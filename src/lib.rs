@@ -59,6 +59,14 @@ pub struct Capabilities {
     pub next: bool,
 }
 
+/// Combined media state for one point-in-time read.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MediaSnapshot {
+    pub now_playing: Option<NowPlaying>,
+    pub capabilities: Capabilities,
+    pub output_volume: Option<f64>,
+}
+
 /// Transport commands accepted by [`transport_send`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportCommand {
@@ -133,14 +141,19 @@ pub(crate) fn parse_now_playing(value: &serde_json::Value) -> Option<NowPlaying>
     })
 }
 
-
-/// Resolves transport capabilities from transport availability and the set of
-/// enabled+supported command codes discovered by MediaRemote.
-pub(crate) fn resolve_capabilities(send_available: bool, enabled_codes: &[u32]) -> Capabilities {
+/// Resolves transport capabilities from transport availability, direct
+/// command discovery, and the staged adapter's three-command contract.
+pub(crate) fn resolve_capabilities(
+    send_available: bool,
+    enabled_codes: &[u32],
+    adapter_available: bool,
+) -> Capabilities {
     Capabilities {
         play_pause: send_available,
-        previous: send_available && enabled_codes.contains(&TransportCommand::Previous.code()),
-        next: send_available && enabled_codes.contains(&TransportCommand::Next.code()),
+        previous: send_available
+            && (adapter_available || enabled_codes.contains(&TransportCommand::Previous.code())),
+        next: send_available
+            && (adapter_available || enabled_codes.contains(&TransportCommand::Next.code())),
     }
 }
 
@@ -159,6 +172,8 @@ mod sys {
     unsafe extern "C" {
         pub safe fn umr_now_playing_available() -> c_int;
         pub safe fn umr_transport_available() -> c_int;
+        pub fn umr_output_volume(volume_out: *mut f64) -> c_int;
+        pub safe fn umr_set_output_volume(volume: f64) -> c_int;
         pub fn umr_now_playing_fetch(timeout_ms: u32) -> *mut c_char;
         pub fn umr_free_string(s: *mut c_char);
         pub fn umr_transport_supported_commands(codes: *mut u32, capacity: u32) -> c_int;
@@ -170,6 +185,10 @@ mod sys {
         ) -> u64;
         pub fn umr_now_playing_unsubscribe(handle: u64);
 
+        #[cfg(feature = "spectrum")]
+        pub safe fn umr_spectrum_permission_granted() -> c_int;
+        #[cfg(feature = "spectrum")]
+        pub safe fn umr_spectrum_request_permission() -> c_int;
         #[cfg(feature = "spectrum")]
         pub fn umr_spectrum_start() -> u64;
         #[cfg(feature = "spectrum")]
@@ -189,6 +208,12 @@ mod sys {
     pub fn umr_transport_available() -> c_int {
         0
     }
+    pub unsafe fn umr_output_volume(_volume_out: *mut f64) -> c_int {
+        0
+    }
+    pub fn umr_set_output_volume(_volume: f64) -> c_int {
+        0
+    }
     pub unsafe fn umr_now_playing_fetch(_timeout_ms: u32) -> *mut c_char {
         std::ptr::null_mut()
     }
@@ -204,6 +229,14 @@ mod sys {
         _context: u64,
         _interval_ms: u32,
     ) -> u64 {
+        0
+    }
+    #[cfg(feature = "spectrum")]
+    pub fn umr_spectrum_permission_granted() -> c_int {
+        0
+    }
+    #[cfg(feature = "spectrum")]
+    pub fn umr_spectrum_request_permission() -> c_int {
         0
     }
     #[cfg(feature = "spectrum")]
@@ -397,7 +430,6 @@ fn adapter_now_playing() -> Option<NowPlaying> {
     value
 }
 
-
 // MARK: - Public API
 
 /// Returns whether runtime MediaRemote metadata access is available on this
@@ -410,6 +442,28 @@ pub fn now_playing_available() -> bool {
 /// false, [`transport_send`] always returns `false`.
 pub fn transport_available() -> bool {
     sys::umr_transport_available() != 0
+}
+
+fn valid_output_volume(volume: f64) -> bool {
+    volume.is_finite() && (0.0..=1.0).contains(&volume)
+}
+
+/// Reads the default system output volume as a normalized scalar in [0, 1].
+/// Returns `None` when the platform or output device does not expose a
+/// readable scalar volume control.
+pub fn output_volume() -> Option<f64> {
+    let mut volume = 0.0;
+    let available = unsafe { sys::umr_output_volume(&mut volume) } != 0;
+    available
+        .then_some(volume)
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 1.0))
+}
+
+/// Sets the default system output volume as a normalized scalar in [0, 1].
+/// Invalid values and unavailable or read-only devices return `false`.
+pub fn set_output_volume(volume: f64) -> bool {
+    valid_output_volume(volume) && sys::umr_set_output_volume(volume) != 0
 }
 
 /// Fetches the current Now Playing snapshot. Returns `None` when MediaRemote
@@ -433,18 +487,40 @@ pub fn now_playing_fetch(timeout: Duration) -> Option<NowPlaying> {
     parsed
 }
 
-/// Reads transport capabilities for the current system media session. Missing
-/// command-discovery APIs safely report `previous`/`next` as `false`;
-/// `play_pause` remains available whenever a send path resolved: the direct
-/// dlopen'd MediaRemote symbol or a staged adapter (which delivers through
-/// /usr/bin/perl's system entitlement). Secondary commands additionally
-/// require the discovery APIs to prove they are enabled.
+/// Reads transport capabilities for the current system media session.
+/// A staged adapter accepts all three typed commands. Without it, secondary
+/// commands are enabled only when direct MediaRemote discovery proves support.
 pub fn transport_capabilities() -> Capabilities {
-    let send_available = transport_available() || adapter_directory().is_some();
+    let adapter_available = adapter_directory().is_some();
+    let send_available = transport_available() || adapter_available;
     let mut codes = [0u32; COMMAND_CODE_CAPACITY as usize];
-    let count = unsafe { sys::umr_transport_supported_commands(codes.as_mut_ptr(), codes.len() as u32) };
+    let count =
+        unsafe { sys::umr_transport_supported_commands(codes.as_mut_ptr(), codes.len() as u32) };
     let count = count.clamp(0, codes.len() as i32) as usize;
-    resolve_capabilities(send_available, &codes[..count])
+    resolve_capabilities(send_available, &codes[..count], adapter_available)
+}
+
+fn compose_media_snapshot(
+    now_playing: Option<NowPlaying>,
+    capabilities: Capabilities,
+    output_volume: Option<f64>,
+) -> MediaSnapshot {
+    MediaSnapshot {
+        now_playing,
+        capabilities,
+        output_volume,
+    }
+}
+
+/// Reads metadata, transport capabilities, and default-output volume for one
+/// point-in-time media snapshot. Individual unavailable values remain `None`
+/// or all-false rather than invalidating the rest of the snapshot.
+pub fn media_snapshot(timeout: Duration) -> MediaSnapshot {
+    compose_media_snapshot(
+        now_playing_fetch(timeout),
+        transport_capabilities(),
+        output_volume(),
+    )
 }
 
 /// Sends a transport command through runtime MediaRemote access. Returns
@@ -482,8 +558,9 @@ fn adapter_send(code: u32) -> Option<bool> {
 /// Visual band frequencies in Hz, ordered low to high. Levels returned by
 /// [`spectrum_start`] map one-to-one onto these bins.
 #[cfg(feature = "spectrum")]
-pub const SPECTRUM_BAND_FREQUENCIES_HZ: [f64; 11] =
-    [63.0, 125.0, 250.0, 500.0, 1_000.0, 2_000.0, 3_500.0, 5_000.0, 7_500.0, 10_000.0, 14_000.0];
+pub const SPECTRUM_BAND_FREQUENCIES_HZ: [f64; 11] = [
+    63.0, 125.0, 250.0, 500.0, 1_000.0, 2_000.0, 3_500.0, 5_000.0, 7_500.0, 10_000.0, 14_000.0,
+];
 
 /// Parses a spectrum JSON array (as produced by the Swift layer) into
 /// normalized band levels. Requires exactly [`SPECTRUM_BAND_FREQUENCIES_HZ`]
@@ -543,21 +620,47 @@ impl Drop for Spectrum {
     }
 }
 
+/// Returns whether Screen Recording permission is already granted for the
+/// calling process. This preflight never prompts.
+#[cfg(feature = "spectrum")]
+pub fn spectrum_permission_granted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return sys::umr_spectrum_permission_granted() != 0;
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// Requests Screen Recording permission for the calling process. This may
+/// display the macOS consent prompt and must only run from an explicit user
+/// action. Use [`spectrum_permission_granted`] for non-prompting checks.
+#[cfg(feature = "spectrum")]
+pub fn spectrum_request_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return sys::umr_spectrum_request_permission() != 0;
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 /// Starts capturing system-output audio for spectral analysis. Opt-in,
-/// macOS 15+ at runtime, and requires Screen Recording permission for the
-/// calling app — this function never triggers the prompt itself; check and
-/// request permission through your own UI flow first. `None` on failure.
+/// macOS 15+ at runtime, and requires Screen Recording permission already
+/// granted for the calling app. This function never triggers a prompt.
 #[cfg(feature = "spectrum")]
 pub fn spectrum_start() -> Option<Spectrum> {
     #[cfg(target_os = "macos")]
     {
+        if !spectrum_permission_granted() {
+            return None;
+        }
         let handle = unsafe { sys::umr_spectrum_start() };
         (handle != 0).then(|| Spectrum { handle })
     }
     #[cfg(not(target_os = "macos"))]
     None
 }
-
 
 // MARK: - Subscription
 
@@ -568,16 +671,14 @@ static SUBSCRIPTIONS: Mutex<Option<std::collections::HashMap<u64, NowPlayingCall
 
 /// Registry key for active subscriptions; also passed to the native layer as
 /// the callback context so the trampoline can find its closure.
-static NEXT_SUBSCRIPTION_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+static NEXT_SUBSCRIPTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 unsafe extern "C" fn subscription_trampoline(context: u64, json: *const c_char) {
     let callback = {
-        let guard = SUBSCRIPTIONS.lock().expect("subscription registry poisoned");
-        let callback = guard
-            .as_ref()
-            .and_then(|map| map.get(&context))
-            .cloned();
+        let guard = SUBSCRIPTIONS
+            .lock()
+            .expect("subscription registry poisoned");
+        let callback = guard.as_ref().and_then(|map| map.get(&context)).cloned();
         drop(guard);
         callback
     };
@@ -649,6 +750,37 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn output_volume_validation_rejects_out_of_bounds_values() {
+        assert!(valid_output_volume(0.0));
+        assert!(valid_output_volume(1.0));
+        assert!(!valid_output_volume(-f64::EPSILON));
+        assert!(!valid_output_volume(1.0 + f64::EPSILON));
+        assert!(!valid_output_volume(f64::NAN));
+        assert!(!valid_output_volume(f64::INFINITY));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_volume_stubs_are_unavailable() {
+        assert_eq!(output_volume(), None);
+        assert!(!set_output_volume(0.5));
+    }
+
+    #[test]
+    fn media_snapshot_composes_independent_sources() {
+        let now_playing = parse_now_playing(&json!({ "title": "Track" }));
+        let capabilities = Capabilities {
+            play_pause: true,
+            previous: false,
+            next: true,
+        };
+        let snapshot = compose_media_snapshot(now_playing.clone(), capabilities, Some(0.75));
+        assert_eq!(snapshot.now_playing, now_playing);
+        assert_eq!(snapshot.capabilities, capabilities);
+        assert_eq!(snapshot.output_volume, Some(0.75));
+    }
+
+    #[test]
     fn transport_command_codes_match_media_remote_values() {
         assert_eq!(TransportCommand::PlayPause.code(), 2);
         assert_eq!(TransportCommand::Next.code(), 4);
@@ -666,20 +798,28 @@ mod tests {
         }
         assert_eq!(TransportCommand::try_from(0), Err(UnknownCommand(0)));
         assert_eq!(TransportCommand::try_from(3), Err(UnknownCommand(3)));
-        assert_eq!(TransportCommand::try_from(u32::MAX), Err(UnknownCommand(u32::MAX)));
+        assert_eq!(
+            TransportCommand::try_from(u32::MAX),
+            Err(UnknownCommand(u32::MAX))
+        );
     }
 
     #[test]
     fn capabilities_require_transport_availability() {
-        let none = resolve_capabilities(false, &[2, 4, 5]);
+        let none = resolve_capabilities(false, &[2, 4, 5], false);
         assert!(!none.play_pause);
         assert!(!none.previous);
         assert!(!none.next);
 
-        let send_only = resolve_capabilities(true, &[]);
+        let send_only = resolve_capabilities(true, &[], false);
         assert!(send_only.play_pause);
         assert!(!send_only.previous);
         assert!(!send_only.next);
+
+        let adapter = resolve_capabilities(true, &[], true);
+        assert!(adapter.play_pause);
+        assert!(adapter.previous);
+        assert!(adapter.next);
     }
 
     #[test]
@@ -687,20 +827,24 @@ mod tests {
         // Codes are zero-based MRMediaRemoteCommand values: play/pause=2,
         // next=4, previous=5. The Swift layer only reports supported AND
         // enabled commands, so presence in the set is authoritative.
-        let caps = resolve_capabilities(true, &[2, 4]);
+        let caps = resolve_capabilities(true, &[2, 4], false);
         assert!(caps.play_pause);
         assert!(caps.next);
         assert!(!caps.previous);
 
-        let caps = resolve_capabilities(true, &[2, 5]);
+        let caps = resolve_capabilities(true, &[2, 5], false);
         assert!(caps.previous);
         assert!(!caps.next);
 
-        // An empty discovery result must not invent secondary capabilities.
-        let caps = resolve_capabilities(true, &[2]);
+        // An empty direct discovery result must not invent secondary capabilities.
+        let caps = resolve_capabilities(true, &[2], false);
         assert_eq!(
             caps,
-            Capabilities { play_pause: true, previous: false, next: false }
+            Capabilities {
+                play_pause: true,
+                previous: false,
+                next: false
+            }
         );
     }
 
@@ -858,6 +1002,13 @@ mod tests {
         // Missing artwork keys leave the field empty without error.
         let np = parse_adapter_now_playing(&base).unwrap();
         assert_eq!(np.artwork_data_url, None);
+    }
+    #[cfg(all(feature = "spectrum", not(target_os = "macos")))]
+    #[test]
+    fn non_macos_spectrum_preflight_and_start_are_unavailable() {
+        assert!(!spectrum_permission_granted());
+        assert!(!spectrum_request_permission());
+        assert!(spectrum_start().is_none());
     }
     #[cfg(feature = "spectrum")]
     #[test]

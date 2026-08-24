@@ -25,7 +25,10 @@ fn main() {
 
     match ultra_media_remote::now_playing_fetch(Duration::from_secs(2)) {
         Some(now_playing) => {
-            println!("\n{}", serde_json::to_string_pretty(&now_playing).expect("serialize"));
+            println!(
+                "\n{}",
+                serde_json::to_string_pretty(&now_playing).expect("serialize")
+            );
         }
         None => {
             println!("\nNo now-playing information: nothing is playing, the player did");

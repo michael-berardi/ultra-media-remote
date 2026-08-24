@@ -18,6 +18,7 @@
 
 import Accelerate
 import AVFoundation
+import CoreGraphics
 import CoreMedia
 import Foundation
 @preconcurrency import ScreenCaptureKit
@@ -317,13 +318,26 @@ internal final class SpectrumRegistry: @unchecked Sendable {
 
 // MARK: - Public C ABI
 
+/// Returns 1 when Screen Recording permission is already granted for the
+/// calling process. This is a non-prompting preflight.
+@_cdecl("umr_spectrum_permission_granted")
+public func umr_spectrum_permission_granted() -> Int32 {
+    CGPreflightScreenCaptureAccess() ? 1 : 0
+}
+
+/// Explicitly requests Screen Recording permission for the calling process.
+/// This may show the system consent prompt and must only follow a user action.
+@_cdecl("umr_spectrum_request_permission")
+public func umr_spectrum_request_permission() -> Int32 {
+    CGRequestScreenCaptureAccess() ? 1 : 0
+}
+
 /// Starts capturing system-output audio for spectral analysis. Returns a
-/// nonzero handle on success, 0 when unsupported (macOS < 15) or the capture
-/// could not start — commonly because the calling app lacks Screen Recording
-/// permission, which this API never prompts for itself.
+/// nonzero handle on success, 0 when unsupported, permission is not already
+/// granted, or capture could not start. This API never prompts for access.
 @_cdecl("umr_spectrum_start")
 public func umr_spectrum_start() -> UInt64 {
-    guard #available(macOS 15.0, *) else { return 0 }
+    guard #available(macOS 15.0, *), CGPreflightScreenCaptureAccess() else { return 0 }
     let session = SpectrumSession()
     do {
         try session.start()

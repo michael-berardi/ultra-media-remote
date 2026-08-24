@@ -65,6 +65,13 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static=UltraMediaRemote");
+    // Swift's static archive carries the implementation, while Rust owns the
+    // final link. Keep the public native frameworks explicit at that boundary.
+    println!("cargo:rustc-link-lib=framework=CoreAudio");
+    if env::var_os("CARGO_FEATURE_SPECTRUM").is_some() {
+        println!("cargo:rustc-link-lib=framework=CoreGraphics");
+        println!("cargo:rustc-link-lib=framework=ScreenCaptureKit");
+    }
 
     // On macOS 15+ the Swift concurrency runtime is provided by the system,
     // but the compiler still emits a reference to @rpath/libswift_Concurrency.dylib.

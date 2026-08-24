@@ -15,7 +15,82 @@
  */
 
 import AppKit
+import CoreAudio
 import Foundation
+
+// MARK: - Default output volume
+
+/// Public CoreAudio HAL access to the system's default output device. A device
+/// without a scalar volume control reports an unavailable value.
+private enum SystemOutput {
+    static func defaultDevice() -> AudioObjectID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var device = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device)
+        guard status == noErr, device != kAudioObjectUnknown, device != 0 else { return nil }
+        return device
+    }
+
+    private static func volumeAddress(_ element: UInt32) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: element)
+    }
+
+    static func volumeElements(in device: AudioObjectID) -> [UInt32] {
+        var master = volumeAddress(kAudioObjectPropertyElementMain)
+        if AudioObjectHasProperty(device, &master) {
+            return [kAudioObjectPropertyElementMain]
+        }
+        return [UInt32(1), 2].filter { element in
+            var address = volumeAddress(element)
+            return AudioObjectHasProperty(device, &address)
+        }
+    }
+
+    static func volume() -> Double? {
+        guard let device = defaultDevice() else { return nil }
+        let elements = volumeElements(in: device)
+        guard !elements.isEmpty else { return nil }
+        var total = 0.0
+        for element in elements {
+            var address = volumeAddress(element)
+            var scalar: Float32 = 0
+            var size = UInt32(MemoryLayout<Float32>.size)
+            guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &scalar) == noErr
+            else { return nil }
+            total += Double(scalar)
+        }
+        return min(max(total / Double(elements.count), 0), 1)
+    }
+
+    static func setVolume(_ value: Double) -> Bool {
+        let value = min(max(value, 0), 1)
+        guard let device = defaultDevice() else { return false }
+        var wroteAny = false
+        for element in volumeElements(in: device) {
+            var address = volumeAddress(element)
+            var settable = DarwinBoolean(false)
+            guard AudioObjectIsPropertySettable(device, &address, &settable) == noErr,
+                settable.boolValue
+            else { continue }
+            var scalar = Float32(value)
+            if AudioObjectSetPropertyData(
+                device, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &scalar) == noErr
+            {
+                wroteAny = true
+            }
+        }
+        return wroteAny
+    }
+}
+
 
 // MARK: - Pure mapping helpers
 
@@ -444,6 +519,24 @@ public func umr_now_playing_available() -> Int32 {
 public func umr_transport_available() -> Int32 {
     MediaRemoteController.shared.transportAvailable ? 1 : 0
 }
+
+/// Reads the default output volume as a normalized scalar in [0, 1].
+/// Returns 1 when the device exposes a readable volume control.
+@_cdecl("umr_output_volume")
+public func umr_output_volume(_ volumeOut: UnsafeMutablePointer<Double>?) -> Int32 {
+    guard let volumeOut, let volume = SystemOutput.volume() else { return 0 }
+    volumeOut.pointee = volume
+    return 1
+}
+
+/// Sets the default output volume as a normalized scalar in [0, 1].
+/// Returns 1 when at least one output element accepted the value.
+@_cdecl("umr_set_output_volume")
+public func umr_set_output_volume(_ volume: Double) -> Int32 {
+    guard volume.isFinite, volume >= 0, volume <= 1 else { return 0 }
+    return SystemOutput.setVolume(volume) ? 1 : 0
+}
+
 
 /// Fetches now-playing metadata and returns it as an allocated JSON string
 /// (snake_case keys: pid, app_name, bundle_id, title, artist, album,

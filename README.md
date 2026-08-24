@@ -6,9 +6,11 @@ Every macOS system ships a canonical media session for Music, Spotify, QuickTime
 
 ## Features
 
+- **Reusable media snapshot**: `media_snapshot(timeout)` composes Now Playing, transport capabilities, and default-output volume without app-specific player assumptions.
 - **Now Playing snapshot**: title, artist, album, artwork, owning app name/bundle ID/PID, elapsed/duration seconds, and playing state as a serde-serializable struct.
 - **Transport control**: play/pause, next, previous — sent only when the system reports them as available.
 - **Capability discovery**: per-command support/enabled state via MediaRemote's command-info APIs.
+- **Output volume**: read or set the default CoreAudio output scalar in the normalized range [0, 1].
 - **Live updates** (optional): poll-based subscription delivering snapshots when they change.
 - **Graceful degradation**: unavailable frameworks yield `None`/`false`, never fake data. Non-macOS targets compile to stubs.
 
@@ -32,7 +34,10 @@ ultra-media-remote = { version = "0.1", features = ["spectrum"] }
 
 ```rust
 use std::time::Duration;
-use ultra_media_remote::{now_playing_fetch, transport_capabilities, transport_send, TransportCommand};
+use ultra_media_remote::{
+    media_snapshot, now_playing_fetch, output_volume, set_output_volume,
+    transport_capabilities, transport_send, TransportCommand,
+};
 
 // Current track
 if let Some(np) = now_playing_fetch(Duration::from_secs(1)) {
@@ -45,6 +50,14 @@ if caps.next {
     transport_send(TransportCommand::Next);
 }
 
+// Reusable combined state and default-output volume
+let media = media_snapshot(Duration::from_secs(1));
+if let Some(volume) = media.output_volume {
+    println!("system output volume: {volume:.2}");
+}
+if let Some(volume) = output_volume() {
+    let _ = set_output_volume(volume);
+}
 let _sub = ultra_media_remote::now_playing_subscribe(Duration::from_millis(500), |update| {
     // Some(snapshot) on change, None when nothing is playing anymore.
 });
@@ -53,7 +66,13 @@ let _sub = ultra_media_remote::now_playing_subscribe(Duration::from_millis(500),
 ### Live spectrum (feature `spectrum`)
 
 ```rust
-let bands = ultra_media_remote::spectrum_start()?; // macOS 15+, Screen Recording required
+// Run the request call only from an explicit user action.
+if !ultra_media_remote::spectrum_permission_granted()
+    && !ultra_media_remote::spectrum_request_permission()
+{
+    return;
+}
+let bands = ultra_media_remote::spectrum_start()?; // macOS 15+, access granted
 loop {
     if let Some(levels) = bands.fetch() {
         // 11 normalized levels [0, 1] for 63 Hz .. 14 kHz, ready to render.
@@ -137,10 +156,9 @@ Discovery order: the `ULTRA_MEDIA_REMOTE_ADAPTER_DIR` environment variable overr
 
 ## Spectrum feature notes
 
-
 - The spectrum is an opt-in cargo feature. Without it, no ScreenCaptureKit code is compiled into your binary at all.
 - It captures **system output audio** through a ScreenCaptureKit audio tap (`capturesAudio`, microphone excluded, the calling process's own audio excluded), then analyzes fixed frequency bins with Goertzel magnitudes — identical math to the reference implementation this crate was extracted from, so visuals match.
-- **Permission:** ScreenCaptureKit requires **Screen Recording** permission (System Settings → Privacy & Security → Screen Recording) even for audio-only taps. `spectrum_start` checks availability but **never triggers the prompt itself**; gate the feature behind your own permission flow (for example `CGPreflightScreenCaptureAccess` / `CGRequestScreenCaptureAccess`) and degrade to a hidden EQ view while ungranted.
+- **Permission:** ScreenCaptureKit requires **Screen Recording** permission (System Settings → Privacy & Security → Screen Recording) even for audio-only taps. Call `spectrum_permission_granted()` for a non-prompting preflight. `spectrum_start()` returns `None` until access is already granted and never requests it. Call `spectrum_request_permission()` only from an explicit consent action when your app wants macOS to show the system prompt.
 - Runtime requirement: macOS 15 or newer; on older systems `spectrum_start` returns `None`.
 
 ## Development
