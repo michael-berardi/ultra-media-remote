@@ -1,12 +1,12 @@
 # ultra-media-remote
 
-**Read macOS "Now Playing" info and control media playback from Rust — no private headers, no fragile static linking.**
+**Read macOS “Now Playing” info, artwork, and transport state from a safe Rust API without statically linking Apple's private framework.**
 
-Every macOS system ships a canonical media session: whatever Music, Spotify, QuickTime, or a browser tab is playing right now. Apple exposes it through the private `MediaRemote` framework, which has no public headers and changes between OS releases. `ultra-media-remote` wraps that framework behind a small, proven Swift static library and a safe Rust API, resolving all symbols at runtime with `dlopen`/`dlsym`. If the framework or any symbol is missing, everything degrades gracefully to "unavailable" instead of crashing.
+Every macOS system ships a canonical media session for Music, Spotify, QuickTime, browsers, and other players. `ultra-media-remote` uses two runtime paths: a staged BSD-licensed MediaRemoteAdapter launched through `/usr/bin/perl` for complete modern-macOS metadata, and a small Swift `dlopen`/`dlsym` shim as the direct fallback and transport layer. Missing frameworks, symbols, adapter files, or sessions degrade to `None`/`false` instead of crashing or fabricating data.
 
 ## Features
 
-- **Now Playing snapshot**: title, artist, album, owning app name/bundle ID/PID, elapsed/duration seconds, and playing state as a serde-serializable struct.
+- **Now Playing snapshot**: title, artist, album, artwork, owning app name/bundle ID/PID, elapsed/duration seconds, and playing state as a serde-serializable struct.
 - **Transport control**: play/pause, next, previous — sent only when the system reports them as available.
 - **Capability discovery**: per-command support/enabled state via MediaRemote's command-info APIs.
 - **Live updates** (optional): poll-based subscription delivering snapshots when they change.
@@ -16,6 +16,7 @@ Every macOS system ships a canonical media session: whatever Music, Spotify, Qui
 
 - macOS 14+ (arm64). The Swift toolchain (`swift build`) must be installed; the crate builds its Swift component automatically through `build.rs`.
 - On non-macOS hosts the crate compiles, but every query reports unavailable.
+- **macOS 15.4+ metadata requires the staged adapter and a Developer ID signature.** An ad-hoc-signed `MediaRemoteAdapter.framework` loads, but MediaRemote returns empty sessions. See [Staging the adapter](#staging-the-adapter-macos-154-metadata).
 
 ## Install
 
@@ -52,25 +53,21 @@ let _sub = ultra_media_remote::now_playing_subscribe(Duration::from_millis(500),
 $ cargo run --example nowplaying
 ```
 
-With Music playing, this prints something like:
+A live macOS 26 verification with **“Slip” by Autechre** returned real track metadata and cover art. The base64 payload is shortened here only for readability:
 
 ```json
 {
-  "title": "Example Track",
-  "artist": "Example Artist",
-  "album": "Example Album",
-  "app_name": "Music",
-  "bundle_id": "com.apple.Music",
-  "pid": 412,
-  "elapsed_seconds": 83.0,
-  "duration_seconds": 214.0,
-  "is_playing": true
+  "title": "Slip",
+  "artist": "Autechre",
+  "artwork_data_url": "data:image/jpeg;base64,<artwork omitted>"
 }
 ```
 
-> Fields are optional: players omit what they do not report (browser tabs often withhold `pid`), and unknown values are dropped rather than guessed. When nothing plays, the example prints an honest "no now-playing information" message. Transport capabilities reflect your actual hardware/system state, so the trailing line may show fewer enabled commands than above.
+Fields are optional: players omit what they do not report, and unknown values are dropped rather than guessed. When nothing plays, the example prints an honest “no now-playing information” message. Transport capabilities reflect the active system session.
+
+> **Platform note:** direct `MediaRemote.framework` access through `dlopen` remains available as a fallback, but Apple restricts direct `MRMediaRemoteGetNowPlayingInfo` replies on macOS 15.4 and later. The crate therefore tries the bundled BSD-licensed [MediaRemoteAdapter](third_party/mediaremote-adapter) first. Its `/usr/bin/perl` launcher supplies the system entitlement required by modern macOS, allowing `now_playing_fetch` to return full metadata, including artwork, when both adapter files are staged correctly.
 >
-> **Platform note:** on macOS 15.4 and later, Apple restricts `MRMediaRemoteGetNowPlayingInfo` responses to processes Apple considers eligible. On such systems the direct fetch returns `None` even while audio plays — as observed on macOS 26 during development — while the availability checks still succeed and transport control keeps working. To keep metadata working there, the crate transparently prefers the bundled [MediaRemoteAdapter](third_party/mediaremote-adapter) (see "Staging the adapter" below) and only falls back to the direct dlopen path when the adapter is absent or reports nothing. The crate never fabricates metadata to cover this case.
+> **A Developer ID signature on `MediaRemoteAdapter.framework` is mandatory for modern-macOS metadata.** Ad-hoc signing is insufficient: the framework loads, but queries return empty sessions. If the adapter is absent or returns no usable session, the crate falls back to direct runtime MediaRemote access and still reports `None` rather than fabricating data.
 
 ## Trust & security notes
 
@@ -78,6 +75,7 @@ With Music playing, this prints something like:
 - Because the framework is private, Apple may remove or change symbols in any macOS release. The design assumption is that missing pieces disable features individually — availability checks precede every operation, and failures surface as `false`/`None`, never as fabricated results or crashes.
 - Reading Now Playing metadata and sending transport commands does not require special TCC permissions today, but treat that as an implementation detail of macOS, not a guarantee. Apps distributed through the Mac App Store should not rely on private frameworks.
 - The Swift component only uses public AppKit/Foundation APIs besides the dlopen'd MediaRemote symbols (for example, `NSRunningApplication` to resolve the owning app's name and bundle ID).
+- The BSD-licensed adapter is launched only for metadata reads through `/usr/bin/perl`. Its stdout is size-bounded and parsed as untrusted JSON; artwork must declare an `image/` MIME type and stay within the crate's 1 MiB base64 limit.
 
 ## Staging the adapter (macOS 15.4+ metadata)
 
@@ -95,6 +93,8 @@ cmake --build build/adapter
 ```
 
 Then sign the framework. On macOS 15.4+ (observed on macOS 26) MediaRemote only serves Now Playing data when the loaded dylib carries a valid code signature; an ad-hoc signature loads fine but every query returns an empty session:
+
+> **Do not use `codesign --sign -` for a release or metadata test.** Ad-hoc signing produces empty Now Playing sessions on modern macOS even though the framework loads successfully.
 
 ```console
 codesign --force --options runtime \
