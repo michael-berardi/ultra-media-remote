@@ -21,6 +21,14 @@ fn main() {
         "debug"
     };
 
+    // The spectrum module compiles only when the `spectrum` cargo feature is
+    // enabled, keeping default consumers free of ScreenCaptureKit code.
+    let mut extra_args = Vec::new();
+    if env::var_os("CARGO_FEATURE_SPECTRUM").is_some() {
+        extra_args.push("-Xswiftc".to_string());
+        extra_args.push("-DUMR_SPECTRUM".to_string());
+    }
+
     println!(
         "cargo:rerun-if-changed={}",
         swift_package_dir.join("Package.swift").display()
@@ -34,6 +42,7 @@ fn main() {
         .arg("build")
         .arg("-c")
         .arg(&swift_build_config)
+        .args(&extra_args)
         .current_dir(&swift_package_dir)
         .status()
         .expect("failed to run `swift build` for UltraMediaRemote");

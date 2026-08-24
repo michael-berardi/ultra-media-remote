@@ -14,5 +14,10 @@ build = "build.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[features]
+# Opt-in live system-output spectrum (11-band EQ data). Requires macOS 15+ at
+# runtime and Screen Recording permission for the calling app.
+spectrum = []
+
 [[example]]
 name = "nowplaying"

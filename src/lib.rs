@@ -169,6 +169,13 @@ mod sys {
             interval_ms: u32,
         ) -> u64;
         pub fn umr_now_playing_unsubscribe(handle: u64);
+
+        #[cfg(feature = "spectrum")]
+        pub fn umr_spectrum_start() -> u64;
+        #[cfg(feature = "spectrum")]
+        pub fn umr_spectrum_fetch(handle: u64) -> *mut c_char;
+        #[cfg(feature = "spectrum")]
+        pub fn umr_spectrum_stop(handle: u64);
     }
 }
 
@@ -199,6 +206,16 @@ mod sys {
     ) -> u64 {
         0
     }
+    #[cfg(feature = "spectrum")]
+    pub unsafe fn umr_spectrum_start() -> u64 {
+        0
+    }
+    #[cfg(feature = "spectrum")]
+    pub unsafe fn umr_spectrum_fetch(_handle: u64) -> *mut c_char {
+        std::ptr::null_mut()
+    }
+    #[cfg(feature = "spectrum")]
+    pub unsafe fn umr_spectrum_stop(_handle: u64) {}
     pub unsafe fn umr_now_playing_unsubscribe(_handle: u64) {}
 }
 
@@ -427,10 +444,11 @@ pub fn transport_capabilities() -> Capabilities {
     let mut codes = [0u32; COMMAND_CODE_CAPACITY as usize];
     let count = unsafe { sys::umr_transport_supported_commands(codes.as_mut_ptr(), codes.len() as u32) };
     let count = count.clamp(0, codes.len() as i32) as usize;
-    resolve_capabilities(transport_available(), &codes[..count])
+    resolve_capabilities(send_available, &codes[..count])
 }
 
 /// Sends a transport command through runtime MediaRemote access. Returns
+/// `false` when no send path is available or delivery failed.
 pub fn transport_send(command: TransportCommand) -> bool {
     // The adapter delivers under /usr/bin/perl's system entitlement and is
     // the reliable path on macOS 15.4+; the direct dlopen'd send API remains
@@ -458,6 +476,88 @@ fn adapter_send(code: u32) -> Option<bool> {
         .ok()?;
     Some(status.success())
 }
+
+// MARK: - Spectrum (opt-in via the `spectrum` cargo feature)
+
+/// Visual band frequencies in Hz, ordered low to high. Levels returned by
+/// [`spectrum_start`] map one-to-one onto these bins.
+#[cfg(feature = "spectrum")]
+pub const SPECTRUM_BAND_FREQUENCIES_HZ: [f64; 11] =
+    [63.0, 125.0, 250.0, 500.0, 1_000.0, 2_000.0, 3_500.0, 5_000.0, 7_500.0, 10_000.0, 14_000.0];
+
+/// Parses a spectrum JSON array (as produced by the Swift layer) into
+/// normalized band levels. Requires exactly [`SPECTRUM_BAND_FREQUENCIES_HZ`]
+/// values; each is clamped into [0, 1].
+#[cfg(feature = "spectrum")]
+pub(crate) fn parse_spectrum(text: &str) -> Option<Vec<f32>> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let array = value.as_array()?;
+    if array.len() != SPECTRUM_BAND_FREQUENCIES_HZ.len() {
+        return None;
+    }
+    Some(
+        array
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0).clamp(0.0, 1.0) as f32)
+            .collect(),
+    )
+}
+
+/// Live system-output spectrum handle. Dropping the value stops the capture
+/// and releases its resources.
+#[cfg(feature = "spectrum")]
+pub struct Spectrum {
+    handle: u64,
+}
+
+#[cfg(feature = "spectrum")]
+impl Spectrum {
+    /// Returns the latest 11-band spectrum as normalized levels in [0, 1],
+    /// ordered low to high frequency. `None` when the session died.
+    pub fn fetch(&self) -> Option<Vec<f32>> {
+        #[cfg(target_os = "macos")]
+        {
+            let pointer = unsafe { sys::umr_spectrum_fetch(self.handle) };
+            if pointer.is_null() {
+                return None;
+            }
+            let parsed = unsafe { CStr::from_ptr(pointer) }
+                .to_str()
+                .ok()
+                .and_then(parse_spectrum);
+            unsafe { sys::umr_free_string(pointer) };
+            parsed
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+}
+
+#[cfg(feature = "spectrum")]
+impl Drop for Spectrum {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            sys::umr_spectrum_stop(self.handle)
+        };
+    }
+}
+
+/// Starts capturing system-output audio for spectral analysis. Opt-in,
+/// macOS 15+ at runtime, and requires Screen Recording permission for the
+/// calling app — this function never triggers the prompt itself; check and
+/// request permission through your own UI flow first. `None` on failure.
+#[cfg(feature = "spectrum")]
+pub fn spectrum_start() -> Option<Spectrum> {
+    #[cfg(target_os = "macos")]
+    {
+        let handle = unsafe { sys::umr_spectrum_start() };
+        (handle != 0).then(|| Spectrum { handle })
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 
 // MARK: - Subscription
 
@@ -758,5 +858,20 @@ mod tests {
         // Missing artwork keys leave the field empty without error.
         let np = parse_adapter_now_playing(&base).unwrap();
         assert_eq!(np.artwork_data_url, None);
+    }
+    #[cfg(feature = "spectrum")]
+    #[test]
+    fn spectrum_payload_parses_and_clamps() {
+        let good = "[0.0, 0.25, 1.0, 0.5, 0.75, 0.1, 0.2, 0.3, 0.4, 0.9, 1.0]";
+        let parsed = parse_spectrum(good).expect("11-band payload parses");
+        assert_eq!(parsed.len(), SPECTRUM_BAND_FREQUENCIES_HZ.len());
+        assert_eq!(parsed[2], 1.0);
+
+        // Out-of-range values clamp; wrong lengths are rejected.
+        let clamped = parse_spectrum(&serde_json::json!([]).to_string());
+        assert!(clamped.is_none());
+        let bad = parse_spectrum("[0, 0, 0]");
+        assert!(bad.is_none(), "wrong band count must be rejected");
+        assert!(parse_spectrum("not json").is_none());
     }
 }

@@ -25,6 +25,11 @@ let package = Package(
         .target(
             name: "UltraMediaRemote",
             path: "Sources/UltraMediaRemote"
+        ),
+        .testTarget(
+            name: "UltraMediaRemoteTests",
+            dependencies: ["UltraMediaRemote"],
+            path: "Tests/UltraMediaRemoteTests"
         )
     ]
 )

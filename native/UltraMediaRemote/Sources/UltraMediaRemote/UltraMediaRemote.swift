@@ -423,7 +423,7 @@ internal final class SubscriptionRegistry: @unchecked Sendable {
 // MARK: - Helpers
 
 extension String {
-    fileprivate func duplicateAsCChar() -> UnsafeMutablePointer<CChar> {
+    internal func duplicateAsCChar() -> UnsafeMutablePointer<CChar> {
         guard let duplicate = withCString({ strdup($0) }) else {
             fatalError("Unable to allocate C string")
         }
