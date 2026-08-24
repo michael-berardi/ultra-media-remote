@@ -94,7 +94,15 @@ cmake --build build/adapter
 # -> build/adapter/MediaRemoteAdapter.framework
 ```
 
-Then stage both next to your binary, or in your app bundle's Resources:
+Then sign the framework. On macOS 15.4+ (observed on macOS 26) MediaRemote only serves Now Playing data when the loaded dylib carries a valid code signature; an ad-hoc signature loads fine but every query returns an empty session:
+
+```console
+codesign --force --options runtime \
+  --sign "Developer ID Application: <Your Team Name> (<Team ID>)" \
+  build/adapter/MediaRemoteAdapter.framework
+```
+
+Stage both parts next to your binary, or in your app bundle's Resources:
 
 ```text
 myapp                          # your binary
