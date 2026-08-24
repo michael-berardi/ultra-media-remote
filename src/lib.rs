@@ -418,8 +418,12 @@ pub fn now_playing_fetch(timeout: Duration) -> Option<NowPlaying> {
 
 /// Reads transport capabilities for the current system media session. Missing
 /// command-discovery APIs safely report `previous`/`next` as `false`;
-/// `play_pause` remains available whenever the send API resolved.
+/// `play_pause` remains available whenever a send path resolved: the direct
+/// dlopen'd MediaRemote symbol or a staged adapter (which delivers through
+/// /usr/bin/perl's system entitlement). Secondary commands additionally
+/// require the discovery APIs to prove they are enabled.
 pub fn transport_capabilities() -> Capabilities {
+    let send_available = transport_available() || adapter_directory().is_some();
     let mut codes = [0u32; COMMAND_CODE_CAPACITY as usize];
     let count = unsafe { sys::umr_transport_supported_commands(codes.as_mut_ptr(), codes.len() as u32) };
     let count = count.clamp(0, codes.len() as i32) as usize;
@@ -427,9 +431,32 @@ pub fn transport_capabilities() -> Capabilities {
 }
 
 /// Sends a transport command through runtime MediaRemote access. Returns
-/// `false` when the transport is unavailable or delivery failed.
 pub fn transport_send(command: TransportCommand) -> bool {
+    // The adapter delivers under /usr/bin/perl's system entitlement and is
+    // the reliable path on macOS 15.4+; the direct dlopen'd send API remains
+    // as fallback for environments where the adapter is not staged.
+    if let Some(sent) = adapter_send(command.code()) {
+        return sent;
+    }
     unsafe { sys::umr_transport_send(command.code()) != 0 }
+}
+
+/// Sends one transport command through the staged adapter, mirroring the
+/// metadata path's process model. Returns `None` when no adapter is staged or
+/// it could not be spawned; `Some(false)` covers both delivery failure and
+/// the adapter rejecting the command code.
+fn adapter_send(code: u32) -> Option<bool> {
+    let directory = adapter_directory()?;
+    let status = Command::new("/usr/bin/perl")
+        .arg(directory.join("mediaremote-adapter.pl"))
+        .arg(directory.join("MediaRemoteAdapter.framework"))
+        .arg("send")
+        .arg(code.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    Some(status.success())
 }
 
 // MARK: - Subscription
