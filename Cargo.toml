@@ -1,6 +1,6 @@
 [package]
 name = "ultra-media-remote"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "macOS Now Playing info and media transport control through runtime-only MediaRemote access, via a small Swift static library."
 license = "MIT"

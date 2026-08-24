@@ -18,6 +18,7 @@
 
 import Accelerate
 import AVFoundation
+import AudioToolbox
 import CoreGraphics
 import CoreMedia
 import Foundation
@@ -105,6 +106,24 @@ final class SpectrumStore: @unchecked Sendable {
         }
     }
 
+    func ingest(_ buffer: AVAudioPCMBuffer) {
+        guard let channels = buffer.floatChannelData else { return }
+        let format = buffer.format
+        let channelCount = Int(format.channelCount)
+        let sampleCount = Int(buffer.frameLength)
+        guard channelCount > 0, sampleCount > 0 else { return }
+        var spectrum = [Float](repeating: 0, count: SystemAudioSignal.bandCount)
+        for channelIndex in 0..<channelCount {
+            SystemAudioSignal.accumulateSpectrum(
+                samples: channels[channelIndex],
+                count: sampleCount,
+                sampleRate: format.sampleRate,
+                into: &spectrum
+            )
+        }
+        set(spectrum: spectrum)
+    }
+
     func reset() {
         lock.withLock {
             storedSpectrum = [Float](repeating: 0, count: SystemAudioSignal.bandCount)
@@ -139,36 +158,8 @@ private final class SpectrumOutput: NSObject, SCStreamOutput, @unchecked Sendabl
             at: 0,
             frameCount: Int32(frameCount),
             into: buffer.mutableAudioBufferList
-        ) == noErr,
-            let channels = buffer.floatChannelData
-        else { return }
-
-        let channelCount = Int(format.channelCount)
-        let sampleCount = Int(frameCount)
-        guard channelCount > 0, sampleCount > 0 else { return }
-        var meanSquareTotal: Float = 0
-        var spectrum = [Float](repeating: 0, count: SystemAudioSignal.bandCount)
-        for channelIndex in 0..<channelCount {
-            var channelMeanSquare: Float = 0
-            vDSP_measqv(
-                channels[channelIndex],
-                1,
-                &channelMeanSquare,
-                vDSP_Length(sampleCount)
-            )
-            meanSquareTotal += channelMeanSquare
-            SystemAudioSignal.accumulateSpectrum(
-                samples: channels[channelIndex],
-                count: sampleCount,
-                sampleRate: format.sampleRate,
-                into: &spectrum
-            )
-        }
-        // The overall level gates nothing here; bands alone drive the EQ view,
-        // but the same RMS path is kept for parity with the reference meter.
-        let rms = sqrt(Double(meanSquareTotal) / Double(channelCount))
-        _ = rms
-        store.set(spectrum: spectrum)
+        ) == noErr else { return }
+        store.ingest(buffer)
     }
 }
 
@@ -217,10 +208,15 @@ private func runAsyncAndBlock<T: Sendable>(
     }
 }
 
+protocol SpectrumCaptureSession: AnyObject, Sendable {
+    func stop()
+    func spectrumJSON() -> String?
+}
+
 /// One active system-audio capture session feeding its own smoothing store.
 /// Each handle owns a dedicated SCStream; callers normally open exactly one.
 @available(macOS 15.0, *)
-final class SpectrumSession: @unchecked Sendable {
+final class SpectrumSession: SpectrumCaptureSession, @unchecked Sendable {
     private let output = SpectrumOutput()
     private let sampleQueue = DispatchQueue(
         label: "dev.implose.ultramediaremote.spectrum",
@@ -285,16 +281,202 @@ final class SpectrumSession: @unchecked Sendable {
         return String(data: data, encoding: .utf8)
     }
 }
+
+/// CoreAudio process taps capture the global output mix without coupling the
+/// visualizer to screen frames. This is the durable-consent migration path for
+/// hosts whose ScreenCaptureKit preflight lags an already-enabled app entry.
+@available(macOS 15.0, *)
+private final class CoreAudioSpectrumSession: SpectrumCaptureSession, @unchecked Sendable {
+    private let store = SpectrumStore()
+    private let sampleQueue = DispatchQueue(
+        label: "dev.implose.ultramediaremote.coreaudio-spectrum",
+        qos: .userInteractive
+    )
+    private let lock = NSLock()
+    private var tapID = AudioObjectID(0)
+    private var aggregateDeviceID = AudioObjectID(0)
+    private var ioProcID: AudioDeviceIOProcID?
+
+    func start() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard tapID == 0 else { return }
+
+        let tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        tapDescription.uuid = UUID()
+        tapDescription.muteBehavior = .unmuted
+        var createdTapID = AudioObjectID(0)
+        var status = AudioHardwareCreateProcessTap(tapDescription, &createdTapID)
+        guard status == noErr else {
+            throw audioError("process tap creation", status)
+        }
+        tapID = createdTapID
+
+        do {
+            let outputDeviceID = try defaultSystemOutputDevice()
+            let outputUID = try deviceUID(outputDeviceID)
+            let aggregateDescription: [String: Any] = [
+                kAudioAggregateDeviceNameKey: "UltraMediaRemote Spectrum",
+                kAudioAggregateDeviceUIDKey: UUID().uuidString,
+                kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+                kAudioAggregateDeviceIsPrivateKey: true,
+                kAudioAggregateDeviceIsStackedKey: false,
+                kAudioAggregateDeviceTapAutoStartKey: true,
+                kAudioAggregateDeviceSubDeviceListKey: [
+                    [kAudioSubDeviceUIDKey: outputUID]
+                ],
+                kAudioAggregateDeviceTapListKey: [
+                    [
+                        kAudioSubTapDriftCompensationKey: true,
+                        kAudioSubTapUIDKey: tapDescription.uuid.uuidString,
+                    ]
+                ],
+            ]
+            status = AudioHardwareCreateAggregateDevice(
+                aggregateDescription as CFDictionary,
+                &aggregateDeviceID
+            )
+            guard status == noErr else {
+                throw audioError("aggregate device creation", status)
+            }
+
+            var streamDescription = try tapStreamDescription(tapID)
+            guard let format = AVAudioFormat(streamDescription: &streamDescription) else {
+                throw audioError("tap format creation", kAudio_ParamError)
+            }
+            status = AudioDeviceCreateIOProcIDWithBlock(
+                &ioProcID,
+                aggregateDeviceID,
+                sampleQueue
+            ) { [weak self] _, inputData, _, _, _ in
+                guard let self,
+                    let buffer = AVAudioPCMBuffer(
+                        pcmFormat: format,
+                        bufferListNoCopy: inputData,
+                        deallocator: nil
+                    )
+                else { return }
+                self.store.ingest(buffer)
+            }
+            guard status == noErr else {
+                throw audioError("I/O callback creation", status)
+            }
+            status = AudioDeviceStart(aggregateDeviceID, ioProcID)
+            guard status == noErr else {
+                throw audioError("aggregate device start", status)
+            }
+        } catch {
+            releaseResources()
+            throw error
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        releaseResources()
+    }
+
+    func spectrumJSON() -> String? {
+        let values = store.spectrum.map { Double($0) }
+        guard let data = try? JSONSerialization.data(withJSONObject: values) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func releaseResources() {
+        if aggregateDeviceID != 0 {
+            _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
+            if let ioProcID {
+                _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+                self.ioProcID = nil
+            }
+            _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            aggregateDeviceID = 0
+        }
+        if tapID != 0 {
+            _ = AudioHardwareDestroyProcessTap(tapID)
+            tapID = 0
+        }
+        store.reset()
+    }
+
+    deinit {
+        releaseResources()
+    }
+}
+
+private func audioError(_ operation: String, _ status: OSStatus) -> NSError {
+    NSError(
+        domain: "UltraMediaRemote.CoreAudio",
+        code: Int(status),
+        userInfo: [NSLocalizedDescriptionKey: "\(operation) failed with OSStatus \(status)"]
+    )
+}
+
+private func defaultSystemOutputDevice() throws -> AudioObjectID {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var deviceID = AudioObjectID(0)
+    var size = UInt32(MemoryLayout<AudioObjectID>.size)
+    let status = AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject),
+        &address,
+        0,
+        nil,
+        &size,
+        &deviceID
+    )
+    guard status == noErr, deviceID != 0 else {
+        throw audioError("default output lookup", status)
+    }
+    return deviceID
+}
+
+private func deviceUID(_ deviceID: AudioObjectID) throws -> String {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceUID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var value: CFString?
+    var size = UInt32(MemoryLayout<CFString?>.size)
+    let status = withUnsafeMutablePointer(to: &value) { pointer in
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, pointer)
+    }
+    guard status == noErr, let value else {
+        throw audioError("output UID lookup", status)
+    }
+    return value as String
+}
+
+private func tapStreamDescription(_ tapID: AudioObjectID) throws -> AudioStreamBasicDescription {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioTapPropertyFormat,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var description = AudioStreamBasicDescription()
+    var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+    let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &description)
+    guard status == noErr else {
+        throw audioError("tap format lookup", status)
+    }
+    return description
+}
+
 /// Registry of active spectrum sessions, keyed by handle.
 @available(macOS 15.0, *)
 internal final class SpectrumRegistry: @unchecked Sendable {
     static let shared = SpectrumRegistry()
 
     private let lock = NSLock()
-    private var sessions: [UInt64: SpectrumSession] = [:]
+    private var sessions: [UInt64: any SpectrumCaptureSession] = [:]
     private var nextHandle: UInt64 = 1
 
-    func add(_ session: SpectrumSession) -> UInt64 {
+    func add(_ session: any SpectrumCaptureSession) -> UInt64 {
         lock.lock()
         defer { lock.unlock() }
         let handle = nextHandle
@@ -303,18 +485,19 @@ internal final class SpectrumRegistry: @unchecked Sendable {
         return handle
     }
 
-    func lookup(_ handle: UInt64) -> SpectrumSession? {
+    func lookup(_ handle: UInt64) -> (any SpectrumCaptureSession)? {
         lock.lock()
         defer { lock.unlock() }
         return sessions[handle]
     }
 
-    func remove(_ handle: UInt64) -> SpectrumSession? {
+    func remove(_ handle: UInt64) -> (any SpectrumCaptureSession)? {
         lock.lock()
         defer { lock.unlock() }
         return sessions.removeValue(forKey: handle)
     }
 }
+
 
 // MARK: - Public C ABI
 
@@ -332,13 +515,32 @@ public func umr_spectrum_request_permission() -> Int32 {
     CGRequestScreenCaptureAccess() ? 1 : 0
 }
 
+@available(macOS 15.0, *)
+private func startSpectrumSession() -> UInt64 {
+    let session = SpectrumSession()
+    do {
+        try session.start()
+    } catch {
+        return 0
+    }
+    return SpectrumRegistry.shared.add(session)
+}
+
 /// Starts capturing system-output audio for spectral analysis. Returns a
 /// nonzero handle on success, 0 when unsupported, permission is not already
 /// granted, or capture could not start. This API never prompts for access.
 @_cdecl("umr_spectrum_start")
 public func umr_spectrum_start() -> UInt64 {
     guard #available(macOS 15.0, *), CGPreflightScreenCaptureAccess() else { return 0 }
-    let session = SpectrumSession()
+    return startSpectrumSession()
+}
+
+/// Starts the global CoreAudio output tap after the host app confirms its
+/// durable, previously recorded EQ consent.
+@_cdecl("umr_spectrum_start_with_existing_consent")
+public func umr_spectrum_start_with_existing_consent() -> UInt64 {
+    guard #available(macOS 15.0, *) else { return 0 }
+    let session = CoreAudioSpectrumSession()
     do {
         try session.start()
     } catch {

@@ -178,6 +178,7 @@ mod sys {
         pub fn umr_free_string(s: *mut c_char);
         pub fn umr_transport_supported_commands(codes: *mut u32, capacity: u32) -> c_int;
         pub fn umr_transport_send(code: u32) -> c_int;
+        pub safe fn umr_seek(seconds: f64) -> c_int;
         pub fn umr_now_playing_subscribe(
             callback: Option<SubscribeCallback>,
             context: u64,
@@ -191,6 +192,8 @@ mod sys {
         pub safe fn umr_spectrum_request_permission() -> c_int;
         #[cfg(feature = "spectrum")]
         pub fn umr_spectrum_start() -> u64;
+        #[cfg(feature = "spectrum")]
+        pub fn umr_spectrum_start_with_existing_consent() -> u64;
         #[cfg(feature = "spectrum")]
         pub fn umr_spectrum_fetch(handle: u64) -> *mut c_char;
         #[cfg(feature = "spectrum")]
@@ -224,6 +227,9 @@ mod sys {
     pub unsafe fn umr_transport_send(_code: u32) -> c_int {
         0
     }
+    pub fn umr_seek(_seconds: f64) -> c_int {
+        0
+    }
     pub unsafe fn umr_now_playing_subscribe(
         _callback: Option<unsafe extern "C" fn(u64, *const c_char)>,
         _context: u64,
@@ -241,6 +247,10 @@ mod sys {
     }
     #[cfg(feature = "spectrum")]
     pub unsafe fn umr_spectrum_start() -> u64 {
+        0
+    }
+    #[cfg(feature = "spectrum")]
+    pub unsafe fn umr_spectrum_start_with_existing_consent() -> u64 {
         0
     }
     #[cfg(feature = "spectrum")]
@@ -430,6 +440,12 @@ fn adapter_now_playing() -> Option<NowPlaying> {
     value
 }
 
+fn invalidate_adapter_cache() {
+    if let Ok(mut cache) = ADAPTER_CACHE.lock() {
+        cache.fetched_at = None;
+    }
+}
+
 // MARK: - Public API
 
 /// Returns whether runtime MediaRemote metadata access is available on this
@@ -528,11 +544,48 @@ pub fn media_snapshot(timeout: Duration) -> MediaSnapshot {
 pub fn transport_send(command: TransportCommand) -> bool {
     // The adapter delivers under /usr/bin/perl's system entitlement and is
     // the reliable path on macOS 15.4+; the direct dlopen'd send API remains
-    // as fallback for environments where the adapter is not staged.
-    if let Some(sent) = adapter_send(command.code()) {
-        return sent;
+    // as fallback when the adapter is absent or rejects delivery.
+    let sent = resolve_transport_send(adapter_send(command.code()), || unsafe {
+        sys::umr_transport_send(command.code()) != 0
+    });
+    if sent {
+        invalidate_adapter_cache();
     }
-    unsafe { sys::umr_transport_send(command.code()) != 0 }
+    sent
+}
+
+fn resolve_transport_send(
+    adapter_result: Option<bool>,
+    direct_send: impl FnOnce() -> bool,
+) -> bool {
+    match adapter_result {
+        Some(true) => true,
+        Some(false) | None => direct_send(),
+    }
+}
+
+/// Seeks the active now-playing timeline to an absolute position in seconds.
+/// The staged adapter is preferred; direct runtime MediaRemote access is the
+/// fallback. Invalid or negative positions are rejected without delivery.
+pub fn seek(position_seconds: f64) -> bool {
+    let Some(position_micros) = seek_position_micros(position_seconds) else {
+        return false;
+    };
+    let sent = resolve_transport_send(adapter_seek(position_micros), || {
+        sys::umr_seek(position_seconds) != 0
+    });
+    if sent {
+        invalidate_adapter_cache();
+    }
+    sent
+}
+
+fn seek_position_micros(position_seconds: f64) -> Option<i64> {
+    if !position_seconds.is_finite() || position_seconds < 0.0 {
+        return None;
+    }
+    let position_micros = position_seconds * 1_000_000.0;
+    (position_micros <= i64::MAX as f64).then(|| position_micros.round() as i64)
 }
 
 /// Sends one transport command through the staged adapter, mirroring the
@@ -546,6 +599,20 @@ fn adapter_send(code: u32) -> Option<bool> {
         .arg(directory.join("MediaRemoteAdapter.framework"))
         .arg("send")
         .arg(code.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    Some(status.success())
+}
+
+fn adapter_seek(position_micros: i64) -> Option<bool> {
+    let directory = adapter_directory()?;
+    let status = Command::new("/usr/bin/perl")
+        .arg(directory.join("mediaremote-adapter.pl"))
+        .arg(directory.join("MediaRemoteAdapter.framework"))
+        .arg("seek")
+        .arg(position_micros.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -656,6 +723,21 @@ pub fn spectrum_start() -> Option<Spectrum> {
             return None;
         }
         let handle = unsafe { sys::umr_spectrum_start() };
+        (handle != 0).then(|| Spectrum { handle })
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Starts the CoreAudio global-output spectrum after a host app confirms
+/// durable user consent from its persisted preference. Hosts must not call
+/// this for first-run or revoked access: macOS may present system-audio consent
+/// UI when that assertion is stale.
+#[cfg(feature = "spectrum")]
+pub fn spectrum_start_with_existing_consent() -> Option<Spectrum> {
+    #[cfg(target_os = "macos")]
+    {
+        let handle = unsafe { sys::umr_spectrum_start_with_existing_consent() };
         (handle != 0).then(|| Spectrum { handle })
     }
     #[cfg(not(target_os = "macos"))]
@@ -910,6 +992,25 @@ mod tests {
         assert!(!serialized.contains("elapsed_seconds"));
         assert!(!serialized.contains("duration_seconds"));
         assert!(serialized.contains("\"is_playing\":false"));
+    }
+    #[test]
+    fn transport_falls_back_after_adapter_failure() {
+        assert!(resolve_transport_send(Some(true), || {
+            panic!("direct send must not run after adapter success")
+        }));
+        assert!(resolve_transport_send(Some(false), || true));
+        assert!(resolve_transport_send(None, || true));
+        assert!(!resolve_transport_send(Some(false), || false));
+    }
+
+    #[test]
+    fn seek_positions_convert_to_adapter_microseconds() {
+        assert_eq!(seek_position_micros(0.0), Some(0));
+        assert_eq!(seek_position_micros(1.25), Some(1_250_000));
+        assert_eq!(seek_position_micros(-0.1), None);
+        assert_eq!(seek_position_micros(f64::NAN), None);
+        assert_eq!(seek_position_micros(f64::INFINITY), None);
+        assert_eq!(seek_position_micros(i64::MAX as f64), None);
     }
 
     #[test]

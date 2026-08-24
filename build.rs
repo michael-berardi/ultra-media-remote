@@ -21,10 +21,20 @@ fn main() {
         "debug"
     };
 
-    // The spectrum module compiles only when the `spectrum` cargo feature is
-    // enabled, keeping default consumers free of ScreenCaptureKit code.
+    // Keep feature variants in separate SwiftPM scratch directories. SwiftPM
+    // does not otherwise invalidate the shared archive when `-DUMR_SPECTRUM`
+    // changes between default and feature-enabled Cargo builds.
+    let spectrum_enabled = env::var_os("CARGO_FEATURE_SPECTRUM").is_some();
+    let swift_scratch_dir = swift_package_dir.join(".build-cargo").join(format!(
+        "{swift_build_config}-{}",
+        if spectrum_enabled {
+            "spectrum"
+        } else {
+            "default"
+        }
+    ));
     let mut extra_args = Vec::new();
-    if env::var_os("CARGO_FEATURE_SPECTRUM").is_some() {
+    if spectrum_enabled {
         extra_args.push("-Xswiftc".to_string());
         extra_args.push("-DUMR_SPECTRUM".to_string());
     }
@@ -42,6 +52,8 @@ fn main() {
         .arg("build")
         .arg("-c")
         .arg(&swift_build_config)
+        .arg("--scratch-path")
+        .arg(&swift_scratch_dir)
         .args(&extra_args)
         .current_dir(&swift_package_dir)
         .status()
@@ -51,8 +63,8 @@ fn main() {
         panic!("`swift build` failed for UltraMediaRemote");
     }
 
-    // SwiftPM places static libraries under .build/<config>.
-    let lib_dir = swift_package_dir.join(".build").join(&swift_build_config);
+    // SwiftPM places static libraries under <scratch>/<config>.
+    let lib_dir = swift_scratch_dir.join(&swift_build_config);
 
     let lib_name = "libUltraMediaRemote.a";
     let lib_path = lib_dir.join(lib_name);
@@ -68,7 +80,7 @@ fn main() {
     // Swift's static archive carries the implementation, while Rust owns the
     // final link. Keep the public native frameworks explicit at that boundary.
     println!("cargo:rustc-link-lib=framework=CoreAudio");
-    if env::var_os("CARGO_FEATURE_SPECTRUM").is_some() {
+    if spectrum_enabled {
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rustc-link-lib=framework=ScreenCaptureKit");
     }

@@ -4,7 +4,7 @@
  *
  *  Exposes @_cdecl functions (umr_*) for Rust callers:
  *    - Now Playing metadata as a JSON string
- *    - Media transport control (play/pause, next, previous)
+ *    - Media transport, timeline seeking, and default-output volume control
  *    - Change subscriptions via polling
  *
  *  Nothing is statically linked: MediaRemote is opened with dlopen/dlsym at
@@ -235,6 +235,7 @@ internal final class MediaRemoteController: @unchecked Sendable {
     static let shared = MediaRemoteController()
 
     private typealias SendCommandFn = @convention(c) (UInt32, AnyObject?) -> UInt8
+    private typealias SetElapsedTimeFn = @convention(c) (Double) -> Void
     private typealias GetNowPlayingInfoFn = @convention(c) (
         DispatchQueue, @escaping @convention(block) (AnyObject?) -> Void
     ) -> Void
@@ -250,6 +251,7 @@ internal final class MediaRemoteController: @unchecked Sendable {
     private typealias SetWantsNotificationsFn = @convention(c) (UInt8) -> Void
 
     private let sendCommand: SendCommandFn?
+    private let setElapsedTime: SetElapsedTimeFn?
     private let getNowPlayingInfo: GetNowPlayingInfoFn?
     private let getNowPlayingApplicationPID: GetNowPlayingApplicationPIDFn?
     private let copySupportedCommands: CopySupportedCommandsFn?
@@ -261,6 +263,7 @@ internal final class MediaRemoteController: @unchecked Sendable {
             "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
         else {
             sendCommand = nil
+            setElapsedTime = nil
             getNowPlayingInfo = nil
             getNowPlayingApplicationPID = nil
             copySupportedCommands = nil
@@ -270,6 +273,9 @@ internal final class MediaRemoteController: @unchecked Sendable {
         }
         sendCommand = dlsym(handle, "MRMediaRemoteSendCommand").map {
             unsafeBitCast($0, to: SendCommandFn.self)
+        }
+        setElapsedTime = dlsym(handle, "MRMediaRemoteSetElapsedTime").map {
+            unsafeBitCast($0, to: SetElapsedTimeFn.self)
         }
         getNowPlayingInfo = dlsym(handle, "MRMediaRemoteGetNowPlayingInfo").map {
             unsafeBitCast($0, to: GetNowPlayingInfoFn.self)
@@ -318,6 +324,13 @@ internal final class MediaRemoteController: @unchecked Sendable {
     func send(code: UInt32) -> Bool {
         guard let send = sendCommand else { return false }
         return send(code, nil) != 0
+    }
+
+    /// Seeks the now-playing application when the runtime symbol is present.
+    func seek(seconds: Double) -> Bool {
+        guard seconds.isFinite, seconds >= 0, let setElapsedTime else { return false }
+        setElapsedTime(seconds)
+        return true
     }
 
     /// Reads enabled transport commands through MediaRemote's asynchronous
@@ -574,6 +587,13 @@ public func umr_transport_supported_commands(
 @_cdecl("umr_transport_send")
 public func umr_transport_send(_ code: UInt32) -> Int32 {
     MediaRemoteController.shared.send(code: code) ? 1 : 0
+}
+
+/// Seeks the now-playing timeline to an absolute position in seconds.
+/// Returns 1 when the runtime symbol accepted the request.
+@_cdecl("umr_seek")
+public func umr_seek(_ seconds: Double) -> Int32 {
+    MediaRemoteController.shared.seek(seconds: seconds) ? 1 : 0
 }
 
 /// Starts polling-based now-playing updates. `callback` receives a context

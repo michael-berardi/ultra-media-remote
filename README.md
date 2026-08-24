@@ -8,7 +8,7 @@ Every macOS system ships a canonical media session for Music, Spotify, QuickTime
 
 - **Reusable media snapshot**: `media_snapshot(timeout)` composes Now Playing, transport capabilities, and default-output volume without app-specific player assumptions.
 - **Now Playing snapshot**: title, artist, album, artwork, owning app name/bundle ID/PID, elapsed/duration seconds, and playing state as a serde-serializable struct.
-- **Transport control**: play/pause, next, previous — sent only when the system reports them as available.
+- **Playback control**: play/pause, next, previous, and absolute timeline seeking with adapter-first delivery and direct runtime fallback.
 - **Capability discovery**: per-command support/enabled state via MediaRemote's command-info APIs.
 - **Output volume**: read or set the default CoreAudio output scalar in the normalized range [0, 1].
 - **Live updates** (optional): poll-based subscription delivering snapshots when they change.
@@ -24,10 +24,10 @@ Every macOS system ships a canonical media session for Music, Spotify, QuickTime
 
 ```toml
 [dependencies]
-ultra-media-remote = "0.1"
+ultra-media-remote = "0.2"
 
 # Optional: live system-output spectrum (11-band EQ data).
-ultra-media-remote = { version = "0.1", features = ["spectrum"] }
+ultra-media-remote = { version = "0.2", features = ["spectrum"] }
 ```
 
 ## Usage
@@ -35,7 +35,7 @@ ultra-media-remote = { version = "0.1", features = ["spectrum"] }
 ```rust
 use std::time::Duration;
 use ultra_media_remote::{
-    media_snapshot, now_playing_fetch, output_volume, set_output_volume,
+    media_snapshot, now_playing_fetch, output_volume, seek, set_output_volume,
     transport_capabilities, transport_send, TransportCommand,
 };
 
@@ -49,6 +49,7 @@ let caps = transport_capabilities();
 if caps.next {
     transport_send(TransportCommand::Next);
 }
+let _ = seek(90.0); // absolute playback position in seconds
 
 // Reusable combined state and default-output volume
 let media = media_snapshot(Duration::from_secs(1));
@@ -79,6 +80,11 @@ loop {
     }
 }
 ```
+
+Hosts migrating a durable, previously enabled EQ preference can use
+`spectrum_start_with_existing_consent()` to start the CoreAudio global-output
+tap without re-requesting Screen Recording. Call it only for persisted user
+consent; first-run clients should keep the guarded preflight/request flow above.
 
 ### Example: print Now Playing JSON
 
@@ -184,3 +190,8 @@ MIT © 2026 Implose Cybernetics. See [LICENSE](LICENSE).
 ## Third-party notices
 
 [MediaRemoteAdapter](https://github.com/ungive/mediaremote-adapter) is vendored under `third_party/mediaremote-adapter` and redistributed under its BSD 3-Clause license (© Jonas van den Berg and contributors); see [third_party/mediaremote-adapter/LICENSE](third_party/mediaremote-adapter/LICENSE). It is invoked at runtime through `/usr/bin/perl` and is not linked into binaries built against this crate.
+
+The CoreAudio process-tap lifecycle was informed by
+[AudioCap](https://github.com/insidegui/AudioCap) (© 2024 Guilherme Rambo);
+its permissive license is reproduced at
+[`third_party/AudioCap-LICENSE`](third_party/AudioCap-LICENSE).
