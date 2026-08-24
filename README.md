@@ -23,6 +23,9 @@ Every macOS system ships a canonical media session for Music, Spotify, QuickTime
 ```toml
 [dependencies]
 ultra-media-remote = "0.1"
+
+# Optional: live system-output spectrum (11-band EQ data).
+ultra-media-remote = { version = "0.1", features = ["spectrum"] }
 ```
 
 ## Usage
@@ -45,6 +48,17 @@ if caps.next {
 let _sub = ultra_media_remote::now_playing_subscribe(Duration::from_millis(500), |update| {
     // Some(snapshot) on change, None when nothing is playing anymore.
 });
+```
+
+### Live spectrum (feature `spectrum`)
+
+```rust
+let bands = ultra_media_remote::spectrum_start()?; // macOS 15+, Screen Recording required
+loop {
+    if let Some(levels) = bands.fetch() {
+        // 11 normalized levels [0, 1] for 63 Hz .. 14 kHz, ready to render.
+    }
+}
 ```
 
 ### Example: print Now Playing JSON
@@ -77,7 +91,9 @@ Fields are optional: players omit what they do not report, and unknown values ar
 - The Swift component only uses public AppKit/Foundation APIs besides the dlopen'd MediaRemote symbols (for example, `NSRunningApplication` to resolve the owning app's name and bundle ID).
 - The BSD-licensed adapter is launched only for metadata reads through `/usr/bin/perl`. Its stdout is size-bounded and parsed as untrusted JSON; artwork must declare an `image/` MIME type and stay within the crate's 1 MiB base64 limit.
 
-## Staging the adapter (macOS 15.4+ metadata)
+## Staging the adapter (macOS 15.4+ metadata and transport)
+
+Transport delivery also prefers the staged MediaRemoteAdapter (`send COMMAND` with the same zero-based command IDs), falling back to the dlopen'd send API; `play_pause` capability is reported when either send path exists.
 
 The adapter has two parts that must ship with your app:
 
@@ -93,6 +109,7 @@ cmake --build build/adapter
 ```
 
 Then sign the framework. On macOS 15.4+ (observed on macOS 26) MediaRemote only serves Now Playing data when the loaded dylib carries a valid code signature; an ad-hoc signature loads fine but every query returns an empty session:
+
 
 > **Do not use `codesign --sign -` for a release or metadata test.** Ad-hoc signing produces empty Now Playing sessions on modern macOS even though the framework loads successfully.
 
@@ -118,11 +135,20 @@ MyApp.app/Contents/Resources/mediaremote/
 
 Discovery order: the `ULTRA_MEDIA_REMOTE_ADAPTER_DIR` environment variable overrides everything; otherwise `<exe dir>/mediaremote`, then `<exe dir>/../Resources/mediaremote`. A directory counts only when it contains both files. When the adapter is not found or reports no session, [`now_playing_fetch`] silently falls back to the direct MediaRemote path.
 
+## Spectrum feature notes
+
+
+- The spectrum is an opt-in cargo feature. Without it, no ScreenCaptureKit code is compiled into your binary at all.
+- It captures **system output audio** through a ScreenCaptureKit audio tap (`capturesAudio`, microphone excluded, the calling process's own audio excluded), then analyzes fixed frequency bins with Goertzel magnitudes — identical math to the reference implementation this crate was extracted from, so visuals match.
+- **Permission:** ScreenCaptureKit requires **Screen Recording** permission (System Settings → Privacy & Security → Screen Recording) even for audio-only taps. `spectrum_start` checks availability but **never triggers the prompt itself**; gate the feature behind your own permission flow (for example `CGPreflightScreenCaptureAccess` / `CGRequestScreenCaptureAccess`) and degrade to a hidden EQ view while ungranted.
+- Runtime requirement: macOS 15 or newer; on older systems `spectrum_start` returns `None`.
+
 ## Development
 
 ```console
-cargo build              # compiles the Swift package, links it, builds the crate
-cargo test               # unit tests for pure logic (command codes, capability resolution, field mapping)
+cargo build                        # compiles the Swift package, links it, builds the crate
+cargo test                         # Rust unit tests for pure logic
+cd native/UltraMediaRemote && swift test -Xswiftc -DUMR_SPECTRUM   # spectrum analysis tests
 cargo run --example nowplaying
 ```
 
