@@ -43,6 +43,9 @@ pub struct NowPlaying {
     pub duration_seconds: Option<f64>,
     /// Playback state. `None` when the session exposes no rate or playing flag.
     pub is_playing: Option<bool>,
+    /// Cover art as a bounded `data:<mime>;base64,<data>` URL. Populated only
+    /// by the adapter path; the direct MediaRemote dlopen path never yields it.
+    pub artwork_data_url: Option<String>,
 }
 
 /// Media transport capabilities of the current system media session.
@@ -125,8 +128,11 @@ pub(crate) fn parse_now_playing(value: &serde_json::Value) -> Option<NowPlaying>
         elapsed_seconds: time(object, "elapsed_seconds"),
         duration_seconds: time(object, "duration_seconds"),
         is_playing: object.get("is_playing").and_then(|v| v.as_bool()),
+        // The direct MediaRemote path exposes no artwork.
+        artwork_data_url: None,
     })
 }
+
 
 /// Resolves transport capabilities from transport availability and the set of
 /// enabled+supported command codes discovered by MediaRemote.
@@ -273,6 +279,9 @@ fn adapter_seconds(value: &serde_json::Value, key: &str) -> Option<f64> {
         .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
+/// Upper bound for base64 artwork payloads; larger covers are dropped.
+const MAX_ARTWORK_BASE64_BYTES: usize = 1024 * 1024;
+
 /// Parses the adapter's JSON payload into a [`NowPlaying`]. Payloads without
 /// any metadata are rejected so empty sessions do not shadow the fallback.
 pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<NowPlaying> {
@@ -307,6 +316,11 @@ pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<Now
                     .and_then(serde_json::Value::as_f64)
                     .map(|rate| rate > 0.0)
             }),
+        artwork_data_url: adapter_string(value, "artworkData").and_then(|data| {
+            let mime = adapter_string(value, "artworkMimeType")?;
+            (mime.starts_with("image/") && data.len() <= MAX_ARTWORK_BASE64_BYTES)
+                .then(|| format!("data:{mime};base64,{data}"))
+        }),
     })
 }
 
@@ -631,6 +645,8 @@ mod tests {
     fn adapter_payload_parses_realistic_sample() {
         let np = parse_adapter_now_playing(&json!({
             "title": "Bohemian Rhapsody",
+            "artworkData": "QUJD",
+            "artworkMimeType": "image/jpeg",
             "artist": "Queen",
             "album": "A Night At The Opera",
             "bundleIdentifier": "com.apple.Music",
@@ -649,6 +665,11 @@ mod tests {
         assert_eq!(np.elapsed_seconds, Some(83.2));
         assert_eq!(np.duration_seconds, Some(354.32));
         assert_eq!(np.is_playing, Some(true));
+
+        assert_eq!(
+            np.artwork_data_url.as_deref(),
+            Some("data:image/jpeg;base64,QUJD"),
+        );
     }
 
     #[test]
@@ -683,5 +704,32 @@ mod tests {
         assert_eq!(np.artist.as_deref(), Some("Artist"));
         assert_eq!(np.pid, None);
         assert_eq!(np.elapsed_seconds, None);
+    }
+    #[test]
+    fn adapter_artwork_is_bounded_and_mime_checked() {
+        let base = json!({ "title": "T" });
+
+        // Non-image MIME types are rejected.
+        let np = parse_adapter_now_playing(&serde_json::json!({
+            "title": "T",
+            "artworkData": "QUJD",
+            "artworkMimeType": "text/plain",
+        }))
+        .unwrap();
+        assert_eq!(np.artwork_data_url, None);
+
+        // Artwork over the 1 MiB base64 cap is dropped, payload still parses.
+        let oversized = "A".repeat(1024 * 1024 + 1);
+        let np = parse_adapter_now_playing(&serde_json::json!({
+            "title": "T",
+            "artworkData": oversized,
+            "artworkMimeType": "image/png",
+        }))
+        .unwrap();
+        assert_eq!(np.artwork_data_url, None);
+
+        // Missing artwork keys leave the field empty without error.
+        let np = parse_adapter_now_playing(&base).unwrap();
+        assert_eq!(np.artwork_data_url, None);
     }
 }
