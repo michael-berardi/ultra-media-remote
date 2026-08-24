@@ -141,14 +141,21 @@ pub(crate) fn parse_now_playing(value: &serde_json::Value) -> Option<NowPlaying>
     })
 }
 
-/// Resolves transport capabilities from transport availability and direct
-/// command discovery. Adapter presence proves delivery, not whether the
-/// active player implements next/previous; never invent secondary controls.
-pub(crate) fn resolve_capabilities(send_available: bool, enabled_codes: &[u32]) -> Capabilities {
+/// Resolves transport capabilities. Direct MediaRemote discovery is
+/// authoritative when available; the staged adapter is the entitled fallback
+/// on modern macOS and accepts the standard play/pause, previous, and next
+/// command contract used by Music, Spotify, and browser media sessions.
+pub(crate) fn resolve_capabilities(
+    send_available: bool,
+    enabled_codes: &[u32],
+    adapter_available: bool,
+) -> Capabilities {
     Capabilities {
         play_pause: send_available,
-        previous: send_available && enabled_codes.contains(&TransportCommand::Previous.code()),
-        next: send_available && enabled_codes.contains(&TransportCommand::Next.code()),
+        previous: send_available
+            && (adapter_available || enabled_codes.contains(&TransportCommand::Previous.code())),
+        next: send_available
+            && (adapter_available || enabled_codes.contains(&TransportCommand::Next.code())),
     }
 }
 
@@ -499,8 +506,8 @@ pub fn now_playing_fetch(timeout: Duration) -> Option<NowPlaying> {
 }
 
 /// Reads transport capabilities for the current system media session.
-/// Play/pause follows transport delivery availability. Secondary commands are
-/// enabled only when direct MediaRemote discovery proves player support.
+/// The staged adapter restores the standard three-command contract on modern
+/// macOS where direct command discovery is entitlement-restricted.
 pub fn transport_capabilities() -> Capabilities {
     let adapter_available = adapter_directory().is_some();
     let send_available = transport_available() || adapter_available;
@@ -508,7 +515,7 @@ pub fn transport_capabilities() -> Capabilities {
     let count =
         unsafe { sys::umr_transport_supported_commands(codes.as_mut_ptr(), codes.len() as u32) };
     let count = count.clamp(0, codes.len() as i32) as usize;
-    resolve_capabilities(send_available, &codes[..count])
+    resolve_capabilities(send_available, &codes[..count], adapter_available)
 }
 
 fn compose_media_snapshot(
@@ -883,20 +890,20 @@ mod tests {
 
     #[test]
     fn capabilities_require_transport_availability() {
-        let none = resolve_capabilities(false, &[2, 4, 5]);
+        let none = resolve_capabilities(false, &[2, 4, 5], false);
         assert!(!none.play_pause);
         assert!(!none.previous);
         assert!(!none.next);
 
-        let send_only = resolve_capabilities(true, &[]);
+        let send_only = resolve_capabilities(true, &[], false);
         assert!(send_only.play_pause);
         assert!(!send_only.previous);
         assert!(!send_only.next);
 
-        let adapter_only = resolve_capabilities(true, &[]);
-        assert!(adapter_only.play_pause);
-        assert!(!adapter_only.previous);
-        assert!(!adapter_only.next);
+        let adapter = resolve_capabilities(true, &[], true);
+        assert!(adapter.play_pause);
+        assert!(adapter.previous);
+        assert!(adapter.next);
     }
 
     #[test]
@@ -904,17 +911,17 @@ mod tests {
         // Codes are zero-based MRMediaRemoteCommand values: play/pause=2,
         // next=4, previous=5. The Swift layer only reports supported AND
         // enabled commands, so presence in the set is authoritative.
-        let caps = resolve_capabilities(true, &[2, 4]);
+        let caps = resolve_capabilities(true, &[2, 4], false);
         assert!(caps.play_pause);
         assert!(caps.next);
         assert!(!caps.previous);
 
-        let caps = resolve_capabilities(true, &[2, 5]);
+        let caps = resolve_capabilities(true, &[2, 5], false);
         assert!(caps.previous);
         assert!(!caps.next);
 
         // An empty direct discovery result must not invent secondary capabilities.
-        let caps = resolve_capabilities(true, &[2]);
+        let caps = resolve_capabilities(true, &[2], false);
         assert_eq!(
             caps,
             Capabilities {
