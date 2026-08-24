@@ -70,7 +70,7 @@ With Music playing, this prints something like:
 
 > Fields are optional: players omit what they do not report (browser tabs often withhold `pid`), and unknown values are dropped rather than guessed. When nothing plays, the example prints an honest "no now-playing information" message. Transport capabilities reflect your actual hardware/system state, so the trailing line may show fewer enabled commands than above.
 >
-> **Platform note:** on macOS 15.4 and later, Apple restricts `MRMediaRemoteGetNowPlayingInfo` responses to processes Apple considers eligible. On such systems the fetch can return `None` even while audio plays — as observed on macOS 26 during development — while the availability checks still succeed and transport control keeps working. The crate never fabricates metadata to cover this case.
+> **Platform note:** on macOS 15.4 and later, Apple restricts `MRMediaRemoteGetNowPlayingInfo` responses to processes Apple considers eligible. On such systems the direct fetch returns `None` even while audio plays — as observed on macOS 26 during development — while the availability checks still succeed and transport control keeps working. To keep metadata working there, the crate transparently prefers the bundled [MediaRemoteAdapter](third_party/mediaremote-adapter) (see "Staging the adapter" below) and only falls back to the direct dlopen path when the adapter is absent or reports nothing. The crate never fabricates metadata to cover this case.
 
 ## Trust & security notes
 
@@ -78,6 +78,37 @@ With Music playing, this prints something like:
 - Because the framework is private, Apple may remove or change symbols in any macOS release. The design assumption is that missing pieces disable features individually — availability checks precede every operation, and failures surface as `false`/`None`, never as fabricated results or crashes.
 - Reading Now Playing metadata and sending transport commands does not require special TCC permissions today, but treat that as an implementation detail of macOS, not a guarantee. Apps distributed through the Mac App Store should not rely on private frameworks.
 - The Swift component only uses public AppKit/Foundation APIs besides the dlopen'd MediaRemote symbols (for example, `NSRunningApplication` to resolve the owning app's name and bundle ID).
+
+## Staging the adapter (macOS 15.4+ metadata)
+
+The adapter has two parts that must ship with your app:
+
+- `mediaremote-adapter.pl` — the loader script
+- `MediaRemoteAdapter.framework/` — a dylib framework built from `third_party/mediaremote-adapter`
+
+Build the framework once from the vendored source (requires cmake + Xcode toolchain):
+
+```console
+cmake -S third_party/mediaremote-adapter -B build/adapter -DCMAKE_BUILD_TYPE=Release
+cmake --build build/adapter
+# -> build/adapter/MediaRemoteAdapter.framework
+```
+
+Then stage both next to your binary, or in your app bundle's Resources:
+
+```text
+myapp                          # your binary
+mediaremote/
+  mediaremote-adapter.pl
+  MediaRemoteAdapter.framework/
+
+# or inside an app bundle:
+MyApp.app/Contents/Resources/mediaremote/
+  mediaremote-adapter.pl
+  MediaRemoteAdapter.framework/
+```
+
+Discovery order: the `ULTRA_MEDIA_REMOTE_ADAPTER_DIR` environment variable overrides everything; otherwise `<exe dir>/mediaremote`, then `<exe dir>/../Resources/mediaremote`. A directory counts only when it contains both files. When the adapter is not found or reports no session, [`now_playing_fetch`] silently falls back to the direct MediaRemote path.
 
 ## Development
 
@@ -92,7 +123,12 @@ Layout:
 - `native/UltraMediaRemote/` — Swift package producing `libUltraMediaRemote.a` with the `umr_*` C ABI (`dlopen` controller, thread-safe handoff boxes, polling subscriptions).
 - `src/lib.rs` — FFI declarations, safe wrappers, pure mapping logic and tests.
 - `build.rs` — invokes `swift build -c debug|release` matching the Cargo profile and wires up link flags (including `/usr/lib/swift` rpath for the concurrency runtime).
+- `third_party/mediaremote-adapter/` — vendored BSD-3-Clause adapter providing the macOS 15.4+ metadata path.
 
 ## License
 
 MIT © 2026 Implose Cybernetics. See [LICENSE](LICENSE).
+
+## Third-party notices
+
+[MediaRemoteAdapter](https://github.com/ungive/mediaremote-adapter) is vendored under `third_party/mediaremote-adapter` and redistributed under its BSD 3-Clause license (© Jonas van den Berg and contributors); see [third_party/mediaremote-adapter/LICENSE](third_party/mediaremote-adapter/LICENSE). It is invoked at runtime through `/usr/bin/perl` and is not linked into binaries built against this crate.

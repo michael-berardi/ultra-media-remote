@@ -11,8 +11,11 @@
 //! builds; all queries simply report unavailable.
 
 use std::ffi::{c_char, CStr};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::io::Read;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -207,6 +210,163 @@ fn parse_json_c_string(json: *const c_char) -> Option<NowPlaying> {
     parse_now_playing(&value)
 }
 
+// MARK: - MediaRemoteAdapter (macOS 15.4+ metadata path)
+// Apple restricts direct `MRMediaRemoteGetNowPlayingInfo` responses to
+// eligible processes on macOS 15.4+. The bundled BSD-3-Clause MediaRemoteAdapter
+// (third_party/mediaremote-adapter, Jonas van den Berg and contributors) works
+// around this by loading its own MediaRemoteAdapter.framework through
+// /usr/bin/perl, which carries the necessary system entitlement. It prints the
+// current Now Playing dictionary as JSON on stdout.
+
+/// Upper bound for adapter stdout; larger output is treated as corrupt.
+const MAX_ADAPTER_OUTPUT_BYTES: usize = 1536 * 1024;
+
+struct AdapterCache {
+    fetched_at: Option<Instant>,
+    value: Option<NowPlaying>,
+}
+
+static ADAPTER_CACHE: LazyLock<Mutex<AdapterCache>> = LazyLock::new(|| {
+    Mutex::new(AdapterCache {
+        fetched_at: None,
+        value: None,
+    })
+});
+
+/// Locates the staged adapter directory. Candidates, in order: the
+/// `ULTRA_MEDIA_REMOTE_ADAPTER_DIR` environment variable, a `mediaremote`
+/// directory next to the executable, and a `Resources/mediaremote` directory
+/// of an app bundle containing the executable. A candidate counts only when
+/// it contains both adapter parts.
+fn adapter_directory() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("ULTRA_MEDIA_REMOTE_ADAPTER_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(binary_dir) = executable.parent() {
+            candidates.push(binary_dir.join("mediaremote"));
+            if let Some(contents_dir) = binary_dir.parent() {
+                candidates.push(contents_dir.join("Resources").join("mediaremote"));
+            }
+        }
+    }
+    candidates.into_iter().find(|directory| {
+        directory.join("mediaremote-adapter.pl").is_file()
+            && directory.join("MediaRemoteAdapter.framework").is_dir()
+    })
+}
+
+fn adapter_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn adapter_seconds(value: &serde_json::Value, key: &str) -> Option<f64> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+/// Parses the adapter's JSON payload into a [`NowPlaying`]. Payloads without
+/// any metadata are rejected so empty sessions do not shadow the fallback.
+pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<NowPlaying> {
+    let title = adapter_string(value, "title");
+    let artist = adapter_string(value, "artist");
+    let album = adapter_string(value, "album");
+    if title.is_none() && artist.is_none() && album.is_none() {
+        return None;
+    }
+    Some(NowPlaying {
+        title,
+        artist,
+        album,
+        // The adapter does not expose localized app names; the bundle ID is
+        // the stable identifier.
+        app_name: None,
+        bundle_id: adapter_string(value, "bundleIdentifier"),
+        pid: value
+            .get("processIdentifier")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|pid| *pid > 0)
+            .and_then(|pid| i32::try_from(pid).ok()),
+        elapsed_seconds: adapter_seconds(value, "elapsedTimeNow")
+            .or_else(|| adapter_seconds(value, "elapsedTime")),
+        duration_seconds: adapter_seconds(value, "duration"),
+        is_playing: value
+            .get("playing")
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| {
+                value
+                    .get("playbackRate")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|rate| rate > 0.0)
+            }),
+    })
+}
+
+/// Spawns `/usr/bin/perl mediaremote-adapter.pl MediaRemoteAdapter.framework
+/// get --now` and parses its JSON stdout. Output beyond
+/// [`MAX_ADAPTER_OUTPUT_BYTES`] or a nonzero exit is rejected; stderr is
+/// discarded.
+fn read_adapter_now_playing() -> Option<NowPlaying> {
+    let directory = adapter_directory()?;
+    let mut child = Command::new("/usr/bin/perl")
+        .arg(directory.join("mediaremote-adapter.pl"))
+        .arg(directory.join("MediaRemoteAdapter.framework"))
+        .arg("get")
+        .arg("--now")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut bytes = Vec::with_capacity(64 * 1024);
+    let mut stdout = child.stdout.take()?;
+    if stdout
+        .by_ref()
+        .take((MAX_ADAPTER_OUTPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    drop(stdout);
+    if bytes.len() > MAX_ADAPTER_OUTPUT_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    if !child.wait().ok()?.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    parse_adapter_now_playing(&value)
+}
+
+/// Reads Control Center metadata through the bundled MediaRemote adapter,
+/// cached for 2 seconds to keep repeated polls cheap.
+fn adapter_now_playing() -> Option<NowPlaying> {
+    let mut cache = ADAPTER_CACHE.lock().ok()?;
+    if cache
+        .fetched_at
+        .is_some_and(|time| time.elapsed() < Duration::from_secs(2))
+    {
+        return cache.value.clone();
+    }
+    let value = read_adapter_now_playing();
+    cache.fetched_at = Some(Instant::now());
+    cache.value = value.clone();
+    value
+}
+
+
 // MARK: - Public API
 
 /// Returns whether runtime MediaRemote metadata access is available on this
@@ -225,6 +385,14 @@ pub fn transport_available() -> bool {
 /// is unavailable, nothing is playing, or the reply did not arrive within
 /// `timeout`.
 pub fn now_playing_fetch(timeout: Duration) -> Option<NowPlaying> {
+    // The perl adapter runs under /usr/bin/perl's system entitlement and is
+    // the only path that yields metadata on macOS 15.4+; results are cached
+    // for 2 seconds. Direct dlopen'd MediaRemote access remains as the
+    // fallback for older systems and entitlement-less environments where the
+    // adapter is not staged.
+    if let Some(snapshot) = adapter_now_playing() {
+        return Some(snapshot);
+    }
     let pointer = unsafe { sys::umr_now_playing_fetch(timeout_ms(timeout)) };
     if pointer.is_null() {
         return None;
@@ -457,5 +625,63 @@ mod tests {
         assert!(!serialized.contains("elapsed_seconds"));
         assert!(!serialized.contains("duration_seconds"));
         assert!(serialized.contains("\"is_playing\":false"));
+    }
+
+    #[test]
+    fn adapter_payload_parses_realistic_sample() {
+        let np = parse_adapter_now_playing(&json!({
+            "title": "Bohemian Rhapsody",
+            "artist": "Queen",
+            "album": "A Night At The Opera",
+            "bundleIdentifier": "com.apple.Music",
+            "processIdentifier": 412,
+            "elapsedTimeNow": 83.2,
+            "duration": 354.32,
+            "playing": true,
+            "playbackRate": 1.0,
+        }))
+        .expect("realistic adapter payload parses");
+        assert_eq!(np.title.as_deref(), Some("Bohemian Rhapsody"));
+        assert_eq!(np.artist.as_deref(), Some("Queen"));
+        assert_eq!(np.album.as_deref(), Some("A Night At The Opera"));
+        assert_eq!(np.bundle_id.as_deref(), Some("com.apple.Music"));
+        assert_eq!(np.pid, Some(412));
+        assert_eq!(np.elapsed_seconds, Some(83.2));
+        assert_eq!(np.duration_seconds, Some(354.32));
+        assert_eq!(np.is_playing, Some(true));
+    }
+
+    #[test]
+    fn adapter_playing_state_falls_back_to_playback_rate() {
+        let np = parse_adapter_now_playing(&json!({
+            "title": "Paused Track",
+            "playbackRate": 0.0,
+        }))
+        .expect("rate-only payload parses");
+        assert_eq!(np.is_playing, Some(false));
+        assert_eq!(np.elapsed_seconds, None, "no elapsedTime keys present");
+    }
+
+    #[test]
+    fn adapter_payload_rejects_empty_metadata_and_bad_values() {
+        // No metadata keys at all: an empty session must not shadow the
+        // direct MediaRemote fallback.
+        assert!(parse_adapter_now_playing(&json!({ "playing": false })).is_none());
+        assert!(parse_adapter_now_playing(&json!({})).is_none());
+
+        // Whitespace-only strings are dropped; invalid PID/time values too.
+        let np = parse_adapter_now_playing(&json!({
+            "title": "  ",
+            "artist": "Artist",
+            "album": "",
+            "processIdentifier": -5,
+            "elapsedTime": -1.0,
+        }))
+        .expect("artist-only payload parses");
+        assert_eq!(np.title, None);
+        assert_eq!(np.album, None);
+        assert_eq!(np.artist.as_deref(), Some("Artist"));
+        assert_eq!(np.pid, None);
+        assert_eq!(np.elapsed_seconds, None);
     }
 }
