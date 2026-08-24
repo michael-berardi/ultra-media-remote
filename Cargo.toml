@@ -21,3 +21,7 @@ spectrum = []
 
 [[example]]
 name = "nowplaying"
+
+[[example]]
+name = "spectrum"
+required-features = ["spectrum"]
