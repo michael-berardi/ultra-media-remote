@@ -467,7 +467,7 @@ internal final class NowPlayingSubscription: @unchecked Sendable {
 
     private func poll() {
         let snapshot = MediaRemoteController.shared.nowPlayingSnapshot()
-        deliver(snapshot?.jsonString())
+        deliverIfChanged(snapshot?.jsonString())
     }
 
     /// Delivers only when the payload changed since the previous poll.

@@ -141,19 +141,14 @@ pub(crate) fn parse_now_playing(value: &serde_json::Value) -> Option<NowPlaying>
     })
 }
 
-/// Resolves transport capabilities from transport availability, direct
-/// command discovery, and the staged adapter's three-command contract.
-pub(crate) fn resolve_capabilities(
-    send_available: bool,
-    enabled_codes: &[u32],
-    adapter_available: bool,
-) -> Capabilities {
+/// Resolves transport capabilities from transport availability and direct
+/// command discovery. Adapter presence proves delivery, not whether the
+/// active player implements next/previous; never invent secondary controls.
+pub(crate) fn resolve_capabilities(send_available: bool, enabled_codes: &[u32]) -> Capabilities {
     Capabilities {
         play_pause: send_available,
-        previous: send_available
-            && (adapter_available || enabled_codes.contains(&TransportCommand::Previous.code())),
-        next: send_available
-            && (adapter_available || enabled_codes.contains(&TransportCommand::Next.code())),
+        previous: send_available && enabled_codes.contains(&TransportCommand::Previous.code()),
+        next: send_available && enabled_codes.contains(&TransportCommand::Next.code()),
     }
 }
 
@@ -504,8 +499,8 @@ pub fn now_playing_fetch(timeout: Duration) -> Option<NowPlaying> {
 }
 
 /// Reads transport capabilities for the current system media session.
-/// A staged adapter accepts all three typed commands. Without it, secondary
-/// commands are enabled only when direct MediaRemote discovery proves support.
+/// Play/pause follows transport delivery availability. Secondary commands are
+/// enabled only when direct MediaRemote discovery proves player support.
 pub fn transport_capabilities() -> Capabilities {
     let adapter_available = adapter_directory().is_some();
     let send_available = transport_available() || adapter_available;
@@ -513,7 +508,7 @@ pub fn transport_capabilities() -> Capabilities {
     let count =
         unsafe { sys::umr_transport_supported_commands(codes.as_mut_ptr(), codes.len() as u32) };
     let count = count.clamp(0, codes.len() as i32) as usize;
-    resolve_capabilities(send_available, &codes[..count], adapter_available)
+    resolve_capabilities(send_available, &codes[..count])
 }
 
 fn compose_media_snapshot(
@@ -888,20 +883,20 @@ mod tests {
 
     #[test]
     fn capabilities_require_transport_availability() {
-        let none = resolve_capabilities(false, &[2, 4, 5], false);
+        let none = resolve_capabilities(false, &[2, 4, 5]);
         assert!(!none.play_pause);
         assert!(!none.previous);
         assert!(!none.next);
 
-        let send_only = resolve_capabilities(true, &[], false);
+        let send_only = resolve_capabilities(true, &[]);
         assert!(send_only.play_pause);
         assert!(!send_only.previous);
         assert!(!send_only.next);
 
-        let adapter = resolve_capabilities(true, &[], true);
-        assert!(adapter.play_pause);
-        assert!(adapter.previous);
-        assert!(adapter.next);
+        let adapter_only = resolve_capabilities(true, &[]);
+        assert!(adapter_only.play_pause);
+        assert!(!adapter_only.previous);
+        assert!(!adapter_only.next);
     }
 
     #[test]
@@ -909,17 +904,17 @@ mod tests {
         // Codes are zero-based MRMediaRemoteCommand values: play/pause=2,
         // next=4, previous=5. The Swift layer only reports supported AND
         // enabled commands, so presence in the set is authoritative.
-        let caps = resolve_capabilities(true, &[2, 4], false);
+        let caps = resolve_capabilities(true, &[2, 4]);
         assert!(caps.play_pause);
         assert!(caps.next);
         assert!(!caps.previous);
 
-        let caps = resolve_capabilities(true, &[2, 5], false);
+        let caps = resolve_capabilities(true, &[2, 5]);
         assert!(caps.previous);
         assert!(!caps.next);
 
         // An empty direct discovery result must not invent secondary capabilities.
-        let caps = resolve_capabilities(true, &[2], false);
+        let caps = resolve_capabilities(true, &[2]);
         assert_eq!(
             caps,
             Capabilities {
