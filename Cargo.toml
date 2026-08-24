@@ -1,0 +1,18 @@
+[package]
+name = "ultra-media-remote"
+version = "0.1.0"
+edition = "2021"
+description = "macOS Now Playing info and media transport control through runtime-only MediaRemote access, via a small Swift static library."
+license = "MIT"
+authors = ["Implose Cybernetics"]
+readme = "README.md"
+keywords = ["macos", "media", "now-playing", "media-remote"]
+categories = ["os::macos-apis"]
+build = "build.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[example]]
+name = "nowplaying"

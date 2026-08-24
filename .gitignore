@@ -1,0 +1,4 @@
+/target
+/native/**/.build/
+/native/**/.swiftpm/
+.DS_Store
