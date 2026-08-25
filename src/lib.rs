@@ -46,6 +46,14 @@ pub struct NowPlaying {
     /// Cover art as a bounded `data:<mime>;base64,<data>` URL. Populated only
     /// by the adapter path; the direct MediaRemote dlopen path never yields it.
     pub artwork_data_url: Option<String>,
+    /// Current positive rating, when exposed by the active media session.
+    pub is_liked: Option<bool>,
+    /// Current negative rating, when exposed by the active media session.
+    pub is_disliked: Option<bool>,
+    /// Whether the active media session accepts a positive rating command.
+    pub supports_like: bool,
+    /// Whether the active media session accepts a negative rating command.
+    pub supports_dislike: bool,
 }
 
 /// Media transport capabilities of the current system media session.
@@ -57,6 +65,8 @@ pub struct Capabilities {
     pub play_pause: bool,
     pub previous: bool,
     pub next: bool,
+    pub like: bool,
+    pub dislike: bool,
 }
 
 /// Combined media state for one point-in-time read.
@@ -73,6 +83,8 @@ pub enum TransportCommand {
     PlayPause,
     Next,
     Previous,
+    Like,
+    Dislike,
 }
 
 impl TransportCommand {
@@ -82,6 +94,8 @@ impl TransportCommand {
             TransportCommand::PlayPause => 2,
             TransportCommand::Next => 4,
             TransportCommand::Previous => 5,
+            TransportCommand::Like => 106,
+            TransportCommand::Dislike => 107,
         }
     }
 }
@@ -98,6 +112,8 @@ impl TryFrom<u32> for TransportCommand {
             2 => Ok(TransportCommand::PlayPause),
             4 => Ok(TransportCommand::Next),
             5 => Ok(TransportCommand::Previous),
+            106 => Ok(TransportCommand::Like),
+            107 => Ok(TransportCommand::Dislike),
             other => Err(UnknownCommand(other)),
         }
     }
@@ -138,6 +154,16 @@ pub(crate) fn parse_now_playing(value: &serde_json::Value) -> Option<NowPlaying>
         is_playing: object.get("is_playing").and_then(|v| v.as_bool()),
         // The direct MediaRemote path exposes no artwork.
         artwork_data_url: None,
+        is_liked: object.get("is_liked").and_then(|v| v.as_bool()),
+        is_disliked: object.get("is_disliked").and_then(|v| v.as_bool()),
+        supports_like: object
+            .get("supports_like")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        supports_dislike: object
+            .get("supports_dislike")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -156,6 +182,8 @@ pub(crate) fn resolve_capabilities(
             && (adapter_available || enabled_codes.contains(&TransportCommand::Previous.code())),
         next: send_available
             && (adapter_available || enabled_codes.contains(&TransportCommand::Next.code())),
+        like: send_available && enabled_codes.contains(&TransportCommand::Like.code()),
+        dislike: send_available && enabled_codes.contains(&TransportCommand::Dislike.code()),
     }
 }
 
@@ -383,6 +411,16 @@ pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<Now
             (mime.starts_with("image/") && data.len() <= MAX_ARTWORK_BASE64_BYTES)
                 .then(|| format!("data:{mime};base64,{data}"))
         }),
+        is_liked: value.get("isLiked").and_then(serde_json::Value::as_bool),
+        is_disliked: value.get("isBanned").and_then(serde_json::Value::as_bool),
+        supports_like: value
+            .get("supportsIsLiked")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        supports_dislike: value
+            .get("supportsIsBanned")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -534,11 +572,13 @@ fn compose_media_snapshot(
 /// point-in-time media snapshot. Individual unavailable values remain `None`
 /// or all-false rather than invalidating the rest of the snapshot.
 pub fn media_snapshot(timeout: Duration) -> MediaSnapshot {
-    compose_media_snapshot(
-        now_playing_fetch(timeout),
-        transport_capabilities(),
-        output_volume(),
-    )
+    let now_playing = now_playing_fetch(timeout);
+    let mut capabilities = transport_capabilities();
+    if let Some(now_playing) = now_playing.as_ref() {
+        capabilities.like |= now_playing.supports_like;
+        capabilities.dislike |= now_playing.supports_dislike;
+    }
+    compose_media_snapshot(now_playing, capabilities, output_volume())
 }
 
 /// Sends a transport command through runtime MediaRemote access. Returns
@@ -857,6 +897,8 @@ mod tests {
             play_pause: true,
             previous: false,
             next: true,
+            like: false,
+            dislike: false,
         };
         let snapshot = compose_media_snapshot(now_playing.clone(), capabilities, Some(0.75));
         assert_eq!(snapshot.now_playing, now_playing);
@@ -869,6 +911,8 @@ mod tests {
         assert_eq!(TransportCommand::PlayPause.code(), 2);
         assert_eq!(TransportCommand::Next.code(), 4);
         assert_eq!(TransportCommand::Previous.code(), 5);
+        assert_eq!(TransportCommand::Like.code(), 106);
+        assert_eq!(TransportCommand::Dislike.code(), 107);
     }
 
     #[test]
@@ -877,6 +921,8 @@ mod tests {
             TransportCommand::PlayPause,
             TransportCommand::Next,
             TransportCommand::Previous,
+            TransportCommand::Like,
+            TransportCommand::Dislike,
         ] {
             assert_eq!(TransportCommand::try_from(command.code()), Ok(command));
         }
@@ -894,6 +940,8 @@ mod tests {
         assert!(!none.play_pause);
         assert!(!none.previous);
         assert!(!none.next);
+        assert!(!none.like);
+        assert!(!none.dislike);
 
         let send_only = resolve_capabilities(true, &[], false);
         assert!(send_only.play_pause);
@@ -904,6 +952,8 @@ mod tests {
         assert!(adapter.play_pause);
         assert!(adapter.previous);
         assert!(adapter.next);
+        assert!(!adapter.like);
+        assert!(!adapter.dislike);
     }
 
     #[test]
@@ -915,10 +965,14 @@ mod tests {
         assert!(caps.play_pause);
         assert!(caps.next);
         assert!(!caps.previous);
+        assert!(!caps.like);
+        assert!(!caps.dislike);
 
-        let caps = resolve_capabilities(true, &[2, 5], false);
+        let caps = resolve_capabilities(true, &[2, 5, 106, 107], false);
         assert!(caps.previous);
         assert!(!caps.next);
+        assert!(caps.like);
+        assert!(caps.dislike);
 
         // An empty direct discovery result must not invent secondary capabilities.
         let caps = resolve_capabilities(true, &[2], false);
@@ -927,7 +981,9 @@ mod tests {
             Capabilities {
                 play_pause: true,
                 previous: false,
-                next: false
+                next: false,
+                like: false,
+                dislike: false,
             }
         );
     }
