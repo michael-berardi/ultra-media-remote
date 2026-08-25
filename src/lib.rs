@@ -572,13 +572,11 @@ fn compose_media_snapshot(
 /// point-in-time media snapshot. Individual unavailable values remain `None`
 /// or all-false rather than invalidating the rest of the snapshot.
 pub fn media_snapshot(timeout: Duration) -> MediaSnapshot {
-    let now_playing = now_playing_fetch(timeout);
-    let mut capabilities = transport_capabilities();
-    if let Some(now_playing) = now_playing.as_ref() {
-        capabilities.like |= now_playing.supports_like;
-        capabilities.dislike |= now_playing.supports_dislike;
-    }
-    compose_media_snapshot(now_playing, capabilities, output_volume())
+    compose_media_snapshot(
+        now_playing_fetch(timeout),
+        transport_capabilities(),
+        output_volume(),
+    )
 }
 
 /// Sends a transport command through runtime MediaRemote access. Returns
