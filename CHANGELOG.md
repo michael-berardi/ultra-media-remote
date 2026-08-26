@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- MediaRemote unique/content identifiers and media type propagation, plus strict YouTube video-ID extraction for consumers that render confirmed video sessions.
+
 ## [0.2.3] - 2026-08-25
 
 ### Added
