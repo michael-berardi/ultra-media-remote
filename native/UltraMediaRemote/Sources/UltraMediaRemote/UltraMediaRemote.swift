@@ -105,6 +105,9 @@ private enum NowPlayingKey {
     static let title = "kMRMediaRemoteNowPlayingInfoTitle"
     static let artist = "kMRMediaRemoteNowPlayingInfoArtist"
     static let album = "kMRMediaRemoteNowPlayingInfoAlbum"
+    static let uniqueIdentifier = "kMRMediaRemoteNowPlayingInfoUniqueIdentifier"
+    static let contentItemIdentifier = "kMRMediaRemoteNowPlayingInfoContentItemIdentifier"
+    static let mediaType = "kMRMediaRemoteNowPlayingInfoMediaType"
     static let elapsedTime = "kMRMediaRemoteNowPlayingInfoElapsedTime"
     static let duration = "kMRMediaRemoteNowPlayingInfoDuration"
     static let playbackRate = "kMRMediaRemoteNowPlayingInfoPlaybackRate"
@@ -118,10 +121,12 @@ internal struct NowPlayingSnapshot: Equatable, Sendable {
     let title: String?
     let artist: String?
     let album: String?
+    let uniqueIdentifier: String?
+    let contentItemIdentifier: String?
+    let mediaType: Int64?
     let elapsedSeconds: Double?
     let durationSeconds: Double?
     let isPlaying: Bool?
-
     /// Playback rate above zero means playing; falls back to the explicit
     /// playing flag when the rate key is absent.
     static func playingState(from info: [String: Any]) -> Bool? {
@@ -161,6 +166,11 @@ internal struct NowPlayingSnapshot: Equatable, Sendable {
         if let elapsedSeconds { payload["elapsed_seconds"] = elapsedSeconds }
         if let durationSeconds { payload["duration_seconds"] = durationSeconds }
         if let isPlaying { payload["is_playing"] = isPlaying }
+        if let uniqueIdentifier { payload["unique_identifier"] = uniqueIdentifier }
+        if let contentItemIdentifier {
+            payload["content_item_identifier"] = contentItemIdentifier
+        }
+        if let mediaType { payload["media_type"] = mediaType }
         return payload
     }
 
@@ -389,6 +399,9 @@ internal final class MediaRemoteController: @unchecked Sendable {
                 title: dict[NowPlayingKey.title] as? String,
                 artist: dict[NowPlayingKey.artist] as? String,
                 album: dict[NowPlayingKey.album] as? String,
+                uniqueIdentifier: dict[NowPlayingKey.uniqueIdentifier] as? String,
+                contentItemIdentifier: dict[NowPlayingKey.contentItemIdentifier] as? String,
+                mediaType: (dict[NowPlayingKey.mediaType] as? NSNumber)?.int64Value,
                 elapsedSeconds: NowPlayingSnapshot.time(NowPlayingKey.elapsedTime, from: dict),
                 durationSeconds: NowPlayingSnapshot.time(NowPlayingKey.duration, from: dict),
                 isPlaying: NowPlayingSnapshot.playingState(from: dict)))
@@ -410,6 +423,9 @@ internal final class MediaRemoteController: @unchecked Sendable {
             title: info.title,
             artist: info.artist,
             album: info.album,
+            uniqueIdentifier: info.uniqueIdentifier,
+            contentItemIdentifier: info.contentItemIdentifier,
+            mediaType: info.mediaType,
             elapsedSeconds: info.elapsedSeconds,
             durationSeconds: info.durationSeconds,
             isPlaying: info.isPlaying)

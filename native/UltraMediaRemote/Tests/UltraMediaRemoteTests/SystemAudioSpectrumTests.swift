@@ -94,4 +94,27 @@ final class SystemAudioSpectrumTests: XCTestCase {
             XCTAssertLessThanOrEqual(value, 1)
         }
     }
+    func testNowPlayingPayloadPropagatesIdentifiersAndMediaType() {
+        let snapshot = NowPlayingSnapshot(
+            processID: 42,
+            appName: "Safari",
+            bundleIdentifier: "com.apple.Safari",
+            title: "Video",
+            artist: "Channel",
+            album: nil,
+            uniqueIdentifier: "dQw4w9WgXcQ",
+            contentItemIdentifier: "https://youtu.be/dQw4w9WgXcQ",
+            mediaType: 2,
+            elapsedSeconds: 5,
+            durationSeconds: 120,
+            isPlaying: true)
+
+        let payload = snapshot.jsonPayload
+        XCTAssertEqual(payload["unique_identifier"] as? String, "dQw4w9WgXcQ")
+        XCTAssertEqual(
+            payload["content_item_identifier"] as? String,
+            "https://youtu.be/dQw4w9WgXcQ")
+        XCTAssertEqual((payload["media_type"] as? NSNumber)?.int64Value, 2)
+        XCTAssertNotNil(snapshot.jsonString())
+    }
 }

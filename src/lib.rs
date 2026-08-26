@@ -32,6 +32,12 @@ pub struct NowPlaying {
     pub app_name: Option<String>,
     /// Bundle identifier of the owning application, when resolvable.
     pub bundle_id: Option<String>,
+    /// MediaRemote's stable identifier for the active item, when reported.
+    pub unique_identifier: Option<String>,
+    /// Content catalog identifier for the active item, when reported.
+    pub content_item_identifier: Option<String>,
+    /// MediaPlayer media type (`1` audio, `2` video), when reported.
+    pub media_type: Option<i64>,
     /// Process identifier of the owning application. Best-effort: some
     /// browser sessions expose metadata but withhold the PID.
     pub pid: Option<i32>,
@@ -144,6 +150,9 @@ pub(crate) fn parse_now_playing(value: &serde_json::Value) -> Option<NowPlaying>
         album: string(object, "album"),
         app_name: string(object, "app_name"),
         bundle_id: string(object, "bundle_id"),
+        unique_identifier: string(object, "unique_identifier"),
+        content_item_identifier: string(object, "content_item_identifier"),
+        media_type: object.get("media_type").and_then(|v| v.as_i64()),
         pid: object
             .get("pid")
             .and_then(|v| v.as_i64())
@@ -165,6 +174,78 @@ pub(crate) fn parse_now_playing(value: &serde_json::Value) -> Option<NowPlaying>
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     })
+}
+
+/// Returns a confirmed YouTube video ID from MediaRemote identifier fields.
+///
+/// Identifiers are accepted only when they are exactly the eleven-character
+/// YouTube alphabet, or when they are an explicit YouTube URL. Titles, UUIDs,
+/// and arbitrary substrings are never treated as video IDs.
+pub fn youtube_video_id(
+    unique_identifier: Option<&str>,
+    content_item_identifier: Option<&str>,
+) -> Option<String> {
+    [unique_identifier, content_item_identifier]
+        .into_iter()
+        .flatten()
+        .find_map(youtube_video_id_from_value)
+}
+
+/// Extracts a YouTube video ID from an explicit YouTube URL.
+pub fn youtube_video_id_from_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    let scheme_end = value.find("://")?;
+    let scheme = &value[..scheme_end];
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority_start = scheme_end + 3;
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|offset| authority_start + offset)
+        .unwrap_or(value.len());
+    let host = value[authority_start..authority_end]
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(&value[authority_start..authority_end])
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let remainder = &value[authority_end..];
+    if host == "youtu.be" {
+        return youtube_id(remainder.trim_start_matches('/').split(['?', '#']).next()?);
+    }
+    if !matches!(
+        host.as_str(),
+        "youtube.com" | "www.youtube.com" | "m.youtube.com"
+    ) {
+        return None;
+    }
+    let (path, query) = remainder
+        .split_once('?')
+        .map_or((remainder, ""), |(path, query)| (path, query));
+    if path.eq_ignore_ascii_case("/watch") {
+        let candidate = query.split('&').find_map(|part| part.strip_prefix("v="))?;
+        return youtube_id(candidate.split('#').next().unwrap_or(candidate));
+    }
+    let path_id = path
+        .strip_prefix("/shorts/")
+        .or_else(|| path.strip_prefix("/embed/"))
+        .or_else(|| path.strip_prefix("/live/"))?;
+    youtube_id(path_id.split(['/', '?', '#']).next().unwrap_or(path_id))
+}
+
+fn youtube_video_id_from_value(value: &str) -> Option<String> {
+    youtube_id(value).or_else(|| youtube_video_id_from_url(value))
+}
+
+fn youtube_id(value: &str) -> Option<String> {
+    (value.len() == 11
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
+    .then(|| value.to_owned())
 }
 
 /// Resolves transport capabilities. Direct MediaRemote discovery is
@@ -362,6 +443,13 @@ fn adapter_string(value: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn adapter_identifier(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
 fn adapter_seconds(value: &serde_json::Value, key: &str) -> Option<f64> {
     value
         .get(key)
@@ -378,7 +466,16 @@ pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<Now
     let title = adapter_string(value, "title");
     let artist = adapter_string(value, "artist");
     let album = adapter_string(value, "album");
-    if title.is_none() && artist.is_none() && album.is_none() {
+    let unique_identifier = adapter_identifier(value, "uniqueIdentifier");
+    let content_item_identifier = adapter_identifier(value, "contentItemIdentifier");
+    let media_type = value.get("mediaType").and_then(serde_json::Value::as_i64);
+    if title.is_none()
+        && artist.is_none()
+        && album.is_none()
+        && unique_identifier.is_none()
+        && content_item_identifier.is_none()
+        && media_type.is_none()
+    {
         return None;
     }
     Some(NowPlaying {
@@ -389,6 +486,9 @@ pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<Now
         // the stable identifier.
         app_name: None,
         bundle_id: adapter_string(value, "bundleIdentifier"),
+        unique_identifier,
+        content_item_identifier,
+        media_type,
         pid: value
             .get("processIdentifier")
             .and_then(serde_json::Value::as_i64)
@@ -994,6 +1094,9 @@ mod tests {
             "album": "Album",
             "app_name": "Music",
             "bundle_id": "com.apple.Music",
+            "unique_identifier": "dQw4w9WgXcQ",
+            "content_item_identifier": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "media_type": 2,
             "pid": 1234,
             "elapsed_seconds": 42.5,
             "duration_seconds": 200.0,
@@ -1005,6 +1108,12 @@ mod tests {
         assert_eq!(np.album.as_deref(), Some("Album"));
         assert_eq!(np.app_name.as_deref(), Some("Music"));
         assert_eq!(np.bundle_id.as_deref(), Some("com.apple.Music"));
+        assert_eq!(np.unique_identifier.as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(
+            np.content_item_identifier.as_deref(),
+            Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        );
+        assert_eq!(np.media_type, Some(2));
         assert_eq!(np.pid, Some(1234));
         assert_eq!(np.elapsed_seconds, Some(42.5));
         assert_eq!(np.duration_seconds, Some(200.0));
@@ -1014,6 +1123,33 @@ mod tests {
         let serialized = serde_json::to_value(&np).unwrap();
         assert_eq!(serialized["app_name"], "Music");
         assert_eq!(serialized["is_playing"], true);
+    }
+
+    #[test]
+    fn youtube_id_requires_exact_identifiers_or_explicit_urls() {
+        assert_eq!(
+            youtube_video_id(Some("dQw4w9WgXcQ"), None).as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            youtube_video_id(None, Some("https://youtu.be/dQw4w9WgXcQ?t=4")).as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            youtube_video_id(None, Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(youtube_video_id(Some("UUID-dQw4w9WgXcQ"), None), None);
+        assert_eq!(youtube_video_id(Some("A video title"), None), None);
+        assert_eq!(
+            youtube_video_id_from_url("https://example.com/watch?v=dQw4w9WgXcQ"),
+            None
+        );
+        assert_eq!(
+            youtube_video_id_from_url("https://www.youtube.com/watch?v=too-short"),
+            None
+        );
+        assert_eq!(youtube_video_id(Some(" dQw4w9WgXcQ "), None), None);
     }
 
     #[test]
@@ -1078,6 +1214,9 @@ mod tests {
             "artist": "Queen",
             "album": "A Night At The Opera",
             "bundleIdentifier": "com.apple.Music",
+            "uniqueIdentifier": "dQw4w9WgXcQ",
+            "contentItemIdentifier": "https://youtu.be/dQw4w9WgXcQ",
+            "mediaType": 2,
             "processIdentifier": 412,
             "elapsedTimeNow": 83.2,
             "duration": 354.32,
@@ -1089,6 +1228,12 @@ mod tests {
         assert_eq!(np.artist.as_deref(), Some("Queen"));
         assert_eq!(np.album.as_deref(), Some("A Night At The Opera"));
         assert_eq!(np.bundle_id.as_deref(), Some("com.apple.Music"));
+        assert_eq!(np.unique_identifier.as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(
+            np.content_item_identifier.as_deref(),
+            Some("https://youtu.be/dQw4w9WgXcQ")
+        );
+        assert_eq!(np.media_type, Some(2));
         assert_eq!(np.pid, Some(412));
         assert_eq!(np.elapsed_seconds, Some(83.2));
         assert_eq!(np.duration_seconds, Some(354.32));
