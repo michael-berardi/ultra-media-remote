@@ -40,6 +40,9 @@ NSDictionary *internal_get(BOOL isTestMode) {
           if (pid != 0) {
               liveData[kMRAProcessIdentifier] = @(pid);
               bool ok = appForPID(pid, ^(NSRunningApplication *process) {
+                if (process.localizedName != nil) {
+                    liveData[kMRAApplicationName] = process.localizedName;
+                }
                 if (process.bundleIdentifier != nil) {
                     liveData[kMRABundleIdentifier] = process.bundleIdentifier;
                 }

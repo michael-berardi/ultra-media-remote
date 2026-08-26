@@ -12,6 +12,7 @@
 // Example: MEDIAREMOTEADAPTER_adapter_send_0_command
 
 extern NSString *kMRAProcessIdentifier;
+extern NSString *kMRAApplicationName;
 extern NSString *kMRABundleIdentifier;
 extern NSString *kMRAParentApplicationBundleIdentifier;
 extern NSString *kMRAPlaying;

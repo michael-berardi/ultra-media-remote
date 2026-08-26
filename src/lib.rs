@@ -491,9 +491,7 @@ pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<Now
         title,
         artist,
         album,
-        // The adapter does not expose localized app names; the bundle ID is
-        // the stable identifier.
-        app_name: None,
+        app_name: adapter_string(value, "applicationName"),
         bundle_id: adapter_string(value, "bundleIdentifier"),
         unique_identifier,
         content_item_identifier,
@@ -1226,6 +1224,7 @@ mod tests {
             "artworkMimeType": "image/jpeg",
             "artist": "Queen",
             "album": "A Night At The Opera",
+            "applicationName": "Music",
             "bundleIdentifier": "com.apple.Music",
             "uniqueIdentifier": "dQw4w9WgXcQ",
             "contentItemIdentifier": "https://youtu.be/dQw4w9WgXcQ",
@@ -1240,6 +1239,7 @@ mod tests {
         assert_eq!(np.title.as_deref(), Some("Bohemian Rhapsody"));
         assert_eq!(np.artist.as_deref(), Some("Queen"));
         assert_eq!(np.album.as_deref(), Some("A Night At The Opera"));
+        assert_eq!(np.app_name.as_deref(), Some("Music"));
         assert_eq!(np.bundle_id.as_deref(), Some("com.apple.Music"));
         assert_eq!(np.unique_identifier.as_deref(), Some("dQw4w9WgXcQ"));
         assert_eq!(

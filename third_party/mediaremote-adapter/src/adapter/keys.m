@@ -6,6 +6,7 @@
 #import "MediaRemoteAdapter.h"
 
 NSString *kMRAProcessIdentifier = @"processIdentifier";
+NSString *kMRAApplicationName = @"applicationName";
 NSString *kMRABundleIdentifier = @"bundleIdentifier";
 NSString *kMRAParentApplicationBundleIdentifier =
     @"parentApplicationBundleIdentifier";

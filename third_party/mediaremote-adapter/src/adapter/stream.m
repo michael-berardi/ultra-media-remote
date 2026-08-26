@@ -257,6 +257,9 @@ extern void adapter_stream() {
             }
             liveData[kMRAProcessIdentifier] = @(pid);
             bool ok = appForPID(pid, ^(NSRunningApplication *process) {
+              if (process.localizedName != nil) {
+                  liveData[kMRAApplicationName] = process.localizedName;
+              }
               if (process.bundleIdentifier != nil) {
                   liveData[kMRABundleIdentifier] = process.bundleIdentifier;
               }
@@ -315,6 +318,9 @@ extern void adapter_stream() {
         }
         if (liveData[kMRABundleIdentifier] != nil) {
             converted[kMRABundleIdentifier] = liveData[kMRABundleIdentifier];
+        }
+        if (liveData[kMRAApplicationName] != nil) {
+            converted[kMRAApplicationName] = liveData[kMRAApplicationName];
         }
         if (liveData[kMRAParentApplicationBundleIdentifier] != nil) {
             converted[kMRAParentApplicationBundleIdentifier] =
@@ -407,6 +413,7 @@ extern void adapter_stream() {
                           resetAll();
                       }
                       liveData[kMRABundleIdentifier] = process.bundleIdentifier;
+                      liveData[kMRAApplicationName] = process.localizedName;
                       requestNowPlayingParentApplicationBundleIdentifier();
                       liveData[kMRAPlaying] = @([isPlayingValue boolValue]);
                       if (liveData[kMRATitle] == nil) {
