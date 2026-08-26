@@ -185,10 +185,19 @@ pub fn youtube_video_id(
     unique_identifier: Option<&str>,
     content_item_identifier: Option<&str>,
 ) -> Option<String> {
-    [unique_identifier, content_item_identifier]
+    let mut resolved = None;
+    for value in [unique_identifier, content_item_identifier]
         .into_iter()
         .flatten()
-        .find_map(youtube_video_id_from_value)
+        .filter_map(youtube_video_id_from_value)
+    {
+        match resolved.as_deref() {
+            None => resolved = Some(value),
+            Some(existing) if existing == value => {}
+            Some(_) => return None,
+        }
+    }
+    resolved
 }
 
 /// Extracts a YouTube video ID from an explicit YouTube URL.
@@ -1138,6 +1147,10 @@ mod tests {
         assert_eq!(
             youtube_video_id(None, Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).as_deref(),
             Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            youtube_video_id(Some("dQw4w9WgXcQ"), Some("https://youtu.be/aqz-KE-bpKQ"),),
+            None,
         );
         assert_eq!(youtube_video_id(Some("UUID-dQw4w9WgXcQ"), None), None);
         assert_eq!(youtube_video_id(Some("A video title"), None), None);
