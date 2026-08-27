@@ -310,7 +310,6 @@ mod sys {
         pub fn umr_output_volume(volume_out: *mut f64) -> c_int;
         pub safe fn umr_set_output_volume(volume: f64) -> c_int;
         pub fn umr_now_playing_fetch(timeout_ms: u32) -> *mut c_char;
-        pub fn umr_window_frame_fetch(process_id: i32) -> *mut c_char;
         pub fn umr_free_string(s: *mut c_char);
         pub fn umr_transport_supported_commands(codes: *mut u32, capacity: u32) -> c_int;
         pub fn umr_transport_send(code: u32) -> c_int;
@@ -354,9 +353,6 @@ mod sys {
         0
     }
     pub unsafe fn umr_now_playing_fetch(_timeout_ms: u32) -> *mut c_char {
-        std::ptr::null_mut()
-    }
-    pub unsafe fn umr_window_frame_fetch(_process_id: i32) -> *mut c_char {
         std::ptr::null_mut()
     }
     pub unsafe fn umr_free_string(_s: *mut c_char) {}
@@ -673,26 +669,6 @@ pub fn now_playing_fetch(timeout: Duration) -> Option<NowPlaying> {
     let parsed = parse_json_c_string(pointer);
     unsafe { sys::umr_free_string(pointer) };
     parsed
-}
-
-/// Captures the active media owner's visible video surface as a bounded JPEG
-/// data URL. Returns `None` without screen-capture permission or a visible window.
-pub fn window_frame_fetch(process_id: i32) -> Option<String> {
-    if process_id <= 0 {
-        return None;
-    }
-    let pointer = unsafe { sys::umr_window_frame_fetch(process_id) };
-    if pointer.is_null() {
-        return None;
-    }
-    let frame = unsafe { CStr::from_ptr(pointer) }
-        .to_str()
-        .ok()
-        .map(str::to_owned);
-    unsafe { sys::umr_free_string(pointer) };
-    frame.filter(|value| {
-        value.len() <= 2 * 1024 * 1024 && value.starts_with("data:image/jpeg;base64,")
-    })
 }
 
 /// Reads transport capabilities for the current system media session.

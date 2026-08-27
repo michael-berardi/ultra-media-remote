@@ -535,65 +535,6 @@ extension String {
     }
 }
 
-private enum NowPlayingWindowCapture {
-    static func frameDataURL(processID: pid_t) -> String? {
-        guard processID > 0 else { return nil }
-        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
-            return nil
-        }
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
-            as? [[String: Any]]
-        else { return nil }
-        let candidates = windows.compactMap { window -> (CGWindowID, Double)? in
-            guard (window[kCGWindowOwnerPID as String] as? pid_t) == processID,
-                (window[kCGWindowLayer as String] as? Int) == 0,
-                let id = window[kCGWindowNumber as String] as? CGWindowID,
-                let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
-                let width = bounds["Width"],
-                let height = bounds["Height"],
-                width >= 320,
-                height >= 180
-            else { return nil }
-            return (id, Double(width * height))
-        }
-        guard let windowID = candidates.max(by: { $0.1 < $1.1 })?.0,
-            let image = CGWindowListCreateImage(
-                .null,
-                .optionIncludingWindow,
-                windowID,
-                [.boundsIgnoreFraming, .bestResolution])
-        else { return nil }
-
-        let sourceWidth = min(image.width, Int(Double(image.height) * 16.0 / 9.0))
-        guard sourceWidth > 0,
-            let cropped = image.cropping(to: CGRect(
-                x: 0,
-                y: 0,
-                width: sourceWidth,
-                height: image.height))
-        else { return nil }
-        let width = 960
-        let height = 540
-        guard let context = CGContext(
-            data: nil,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return nil }
-        context.interpolationQuality = .high
-        context.draw(cropped, in: CGRect(x: 0, y: 0, width: width, height: height))
-        guard let scaled = context.makeImage(),
-            let jpeg = NSBitmapImageRep(cgImage: scaled).representation(
-                using: .jpeg,
-                properties: [.compressionFactor: 0.62])
-        else { return nil }
-        return "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
-    }
-}
 
 // MARK: - Public C ABI
 
@@ -700,12 +641,6 @@ public func umr_now_playing_unsubscribe(_ handle: UInt64) {
     _ = SubscriptionRegistry.shared.remove(handle)
 }
 
-/// Captures the largest visible layer-zero window owned by `processID`.
-/// The returned JPEG data URL is cropped to the left 16:9 media surface.
-@_cdecl("umr_window_frame_fetch")
-public func umr_window_frame_fetch(_ processID: Int32) -> UnsafeMutablePointer<CChar>? {
-    NowPlayingWindowCapture.frameDataURL(processID: processID)?.duplicateAsCChar()
-}
 
 /// Frees a string previously returned by this library.
 @_cdecl("umr_free_string")
