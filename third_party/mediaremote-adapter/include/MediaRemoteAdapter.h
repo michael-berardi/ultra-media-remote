@@ -88,6 +88,8 @@ typedef enum {
     kMRAEndBackwardSeek = 11,
     kMRAGoBackFifteenSeconds = 12,
     kMRASkipFifteenSeconds = 13,
+    kMRALikeTrack = 106,
+    kMRABanTrack = 107,
 } MRACommand;
 
 // Sends the given MediaRemote command to the current now playing application.

@@ -30,11 +30,9 @@ __attribute__((constructor)) static void init() {
         @(kMRAEndBackwardSeek),
         @(kMRAGoBackFifteenSeconds),
         @(kMRASkipFifteenSeconds),
+        @(kMRALikeTrack),
+        @(kMRABanTrack),
     ];
-    // TODO like/unlike tracks by reading now playing information first,
-    // getting the track ID, station ID and station hash
-    // and then sending the respective MRCommand.
-    // does "ban" mean "remove like" here?
 }
 
 static MRCommand findCommand(int command, bool *found) {
@@ -46,6 +44,31 @@ static MRCommand findCommand(int command, bool *found) {
     return (MRCommand)0;
 }
 
+static NSDictionary *ratingOptions(void) {
+    __block NSDictionary *options = nil;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    g_mediaRemote.getNowPlayingInfo(
+        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+        ^(NSDictionary *information) {
+          NSMutableDictionary *values = [NSMutableDictionary dictionary];
+          id trackID = information[kMRMediaRemoteNowPlayingInfoUniqueIdentifier]
+              ?: information[kMRMediaRemoteNowPlayingInfoContentItemIdentifier];
+          id stationID = information[kMRMediaRemoteNowPlayingInfoRadioStationIdentifier];
+          id stationHash = information[kMRMediaRemoteNowPlayingInfoRadioStationHash];
+          if (trackID && trackID != [NSNull null])
+              values[kMRMediaRemoteOptionTrackID] = trackID;
+          if (stationID && stationID != [NSNull null])
+              values[kMRMediaRemoteOptionStationID] = stationID;
+          if (stationHash && stationHash != [NSNull null])
+              values[kMRMediaRemoteOptionStationHash] = stationHash;
+          options = [values copy];
+          dispatch_semaphore_signal(semaphore);
+        });
+    dispatch_semaphore_wait(
+        semaphore, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC));
+    return options;
+}
+
 void adapter_send(MRACommand command) {
 
     bool ok = false;
@@ -54,7 +77,13 @@ void adapter_send(MRACommand command) {
         failf(@"Invalid command: %d", command);
     }
 
-    bool result = g_mediaRemote.sendCommand(commandValue, nil);
+    bool ratingCommand =
+        commandValue == kMRLikeTrack || commandValue == kMRBanTrack;
+    NSDictionary *options = ratingCommand ? ratingOptions() : nil;
+    if (ratingCommand && options.count != 3) {
+        failf(@"Missing now-playing identifiers for rating command %d", command);
+    }
+    bool result = g_mediaRemote.sendCommand(commandValue, options);
     if (!result) {
         failf(@"Failed to send command %d", command);
     }

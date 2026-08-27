@@ -38,6 +38,10 @@ pub struct NowPlaying {
     pub content_item_identifier: Option<String>,
     /// MediaPlayer media type (`1` audio, `2` video), when reported.
     pub media_type: Option<i64>,
+    /// Confirmed YouTube video identifier derived from explicit media metadata.
+    pub youtube_video_id: Option<String>,
+    /// Whether the active media session identifies itself as a music app.
+    pub is_music_app: Option<bool>,
     /// Process identifier of the owning application. Best-effort: some
     /// browser sessions expose metadata but withhold the PID.
     pub pid: Option<i32>,
@@ -144,15 +148,24 @@ pub(crate) fn parse_now_playing(value: &serde_json::Value) -> Option<NowPlaying>
             .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
     }
 
+    let unique_identifier = string(object, "unique_identifier");
+    let content_item_identifier = string(object, "content_item_identifier");
+    let youtube_video_id = youtube_video_id(
+        unique_identifier.as_deref(),
+        content_item_identifier.as_deref(),
+    );
+
     Some(NowPlaying {
         title: string(object, "title"),
         artist: string(object, "artist"),
         album: string(object, "album"),
         app_name: string(object, "app_name"),
         bundle_id: string(object, "bundle_id"),
-        unique_identifier: string(object, "unique_identifier"),
-        content_item_identifier: string(object, "content_item_identifier"),
+        unique_identifier,
+        content_item_identifier,
         media_type: object.get("media_type").and_then(|v| v.as_i64()),
+        youtube_video_id,
+        is_music_app: object.get("is_music_app").and_then(|v| v.as_bool()),
         pid: object
             .get("pid")
             .and_then(|v| v.as_i64())
@@ -272,8 +285,10 @@ pub(crate) fn resolve_capabilities(
             && (adapter_available || enabled_codes.contains(&TransportCommand::Previous.code())),
         next: send_available
             && (adapter_available || enabled_codes.contains(&TransportCommand::Next.code())),
-        like: send_available && enabled_codes.contains(&TransportCommand::Like.code()),
-        dislike: send_available && enabled_codes.contains(&TransportCommand::Dislike.code()),
+        like: send_available
+            && (adapter_available || enabled_codes.contains(&TransportCommand::Like.code())),
+        dislike: send_available
+            && (adapter_available || enabled_codes.contains(&TransportCommand::Dislike.code())),
     }
 }
 
@@ -478,6 +493,10 @@ pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<Now
     let unique_identifier = adapter_identifier(value, "uniqueIdentifier");
     let content_item_identifier = adapter_identifier(value, "contentItemIdentifier");
     let media_type = value.get("mediaType").and_then(serde_json::Value::as_i64);
+    let youtube_video_id = youtube_video_id(
+        unique_identifier.as_deref(),
+        content_item_identifier.as_deref(),
+    );
     if title.is_none()
         && artist.is_none()
         && album.is_none()
@@ -496,6 +515,10 @@ pub(crate) fn parse_adapter_now_playing(value: &serde_json::Value) -> Option<Now
         unique_identifier,
         content_item_identifier,
         media_type,
+        youtube_video_id,
+        is_music_app: value
+            .get("isMusicApp")
+            .and_then(serde_json::Value::as_bool),
         pid: value
             .get("processIdentifier")
             .and_then(serde_json::Value::as_i64)
@@ -1057,8 +1080,8 @@ mod tests {
         assert!(adapter.play_pause);
         assert!(adapter.previous);
         assert!(adapter.next);
-        assert!(!adapter.like);
-        assert!(!adapter.dislike);
+        assert!(adapter.like);
+        assert!(adapter.dislike);
     }
 
     #[test]
