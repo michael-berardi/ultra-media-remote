@@ -4,18 +4,21 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.3] - 2026-09-11
 
 ### Added
 
 - MediaRemote unique/content identifiers and media type propagation, plus strict YouTube video-ID extraction for consumers that render confirmed video sessions.
-
-## [0.2.3] - 2026-08-25
-
-### Added
-
 - Capability-gated like and dislike state plus MediaRemote transport commands
   for players that explicitly advertise rating support.
+- Owning application names in media snapshots.
+
+### Fixed
+
+- Conflicting video identifiers are rejected rather than selecting an ambiguous video.
+- Rating capabilities require a deliverable transport command.
+
+External video-window frame capture remains unavailable; consumers should use confirmed media identifiers instead.
 
 
 ## [0.2.0] - 2026-08-24

@@ -9,7 +9,8 @@ Every macOS system ships a canonical media session for Music, Spotify, QuickTime
 - **Reusable media snapshot**: `media_snapshot(timeout)` composes Now Playing, transport capabilities, and default-output volume without app-specific player assumptions.
 - **Now Playing snapshot**: title, artist, album, artwork, owning app name/bundle ID/PID, elapsed/duration seconds, and playing state as a serde-serializable struct.
 - **Playback control**: play/pause, next, previous, and absolute timeline seeking with adapter-first delivery and direct runtime fallback.
-- **Capability discovery**: per-command support/enabled state via MediaRemote's command-info APIs.
+- **Capability discovery**: per-command support/enabled state via MediaRemote's command-info APIs, including like/dislike only when the player advertises a deliverable rating command.
+- **Confirmed video identifiers**: media/content identifiers and strict YouTube ID extraction; conflicting identifiers are rejected. External video-window frame capture is not available.
 - **Output volume**: read or set the default CoreAudio output scalar in the normalized range [0, 1].
 - **Live updates** (optional): poll-based subscription delivering snapshots when they change.
 - **Graceful degradation**: unavailable frameworks yield `None`/`false`, never fake data. Non-macOS targets compile to stubs.
@@ -24,10 +25,10 @@ Every macOS system ships a canonical media session for Music, Spotify, QuickTime
 
 ```toml
 [dependencies]
-ultra-media-remote = "0.2"
+ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.3" }
 
 # Optional: live system-output spectrum (11-band EQ data).
-ultra-media-remote = { version = "0.2", features = ["spectrum"] }
+ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.3", features = ["spectrum"] }
 ```
 
 ## Usage
