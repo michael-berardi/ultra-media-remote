@@ -1,5 +1,7 @@
 # ultra-media-remote
 
+[![Latest release](https://img.shields.io/github/v/release/michael-berardi/ultra-media-remote?label=release)](https://github.com/michael-berardi/ultra-media-remote/releases/latest) [![MIT License](https://img.shields.io/github/license/michael-berardi/ultra-media-remote)](LICENSE) ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black) ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
+
 **Read macOS “Now Playing” info, artwork, and transport state from a safe Rust API without statically linking Apple's private framework.**
 
 Every macOS system ships a canonical media session for Music, Spotify, QuickTime, browsers, and other players. `ultra-media-remote` uses two runtime paths: a staged BSD-licensed MediaRemoteAdapter launched through `/usr/bin/perl` for complete modern-macOS metadata, and a small Swift `dlopen`/`dlsym` shim as the direct fallback and transport layer. Missing frameworks, symbols, adapter files, or sessions degrade to `None`/`false` instead of crashing or fabricating data.
