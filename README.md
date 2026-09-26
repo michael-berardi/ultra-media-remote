@@ -27,8 +27,8 @@ Every macOS system ships a canonical media session for Music, Spotify, QuickTime
 [dependencies]
 ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.3" }
 
-# Optional: live system-output spectrum (11-band EQ data).
-ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.3", features = ["spectrum"] }
+# Or, with the optional live system-output spectrum (11-band EQ data):
+# ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.3", features = ["spectrum"] }
 ```
 
 ## Usage
@@ -183,6 +183,10 @@ Layout:
 - `src/lib.rs` — FFI declarations, safe wrappers, pure mapping logic and tests.
 - `build.rs` — invokes `swift build -c debug|release` matching the Cargo profile and wires up link flags (including `/usr/lib/swift` rpath for the concurrency runtime).
 - `third_party/mediaremote-adapter/` — vendored BSD-3-Clause adapter providing the macOS 15.4+ metadata path.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -51,7 +51,7 @@ fn main() {
     let status = Command::new("swift")
         .arg("build")
         .arg("-c")
-        .arg(&swift_build_config)
+        .arg(swift_build_config)
         .arg("--scratch-path")
         .arg(&swift_scratch_dir)
         .args(&extra_args)
@@ -64,7 +64,7 @@ fn main() {
     }
 
     // SwiftPM places static libraries under <scratch>/<config>.
-    let lib_dir = swift_scratch_dir.join(&swift_build_config);
+    let lib_dir = swift_scratch_dir.join(swift_build_config);
 
     let lib_name = "libUltraMediaRemote.a";
     let lib_path = lib_dir.join(lib_name);
