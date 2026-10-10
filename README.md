@@ -192,7 +192,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as desc
 
 ## License
 
-MIT © 2026 Implose Cybernetics. See [LICENSE](LICENSE).
+MIT © 2026 Pareto Cybernetics. See [LICENSE](LICENSE).
 
 ## Third-party notices
 

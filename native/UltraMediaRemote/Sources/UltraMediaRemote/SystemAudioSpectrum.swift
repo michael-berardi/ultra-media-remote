@@ -219,7 +219,7 @@ protocol SpectrumCaptureSession: AnyObject, Sendable {
 final class SpectrumSession: SpectrumCaptureSession, @unchecked Sendable {
     private let output = SpectrumOutput()
     private let sampleQueue = DispatchQueue(
-        label: "dev.implose.ultramediaremote.spectrum",
+        label: "com.paretocybernetics.ultramediaremote.spectrum",
         qos: .userInteractive
     )
     private let lock = NSLock()
@@ -289,7 +289,7 @@ final class SpectrumSession: SpectrumCaptureSession, @unchecked Sendable {
 private final class CoreAudioSpectrumSession: SpectrumCaptureSession, @unchecked Sendable {
     private let store = SpectrumStore()
     private let sampleQueue = DispatchQueue(
-        label: "dev.implose.ultramediaremote.coreaudio-spectrum",
+        label: "com.paretocybernetics.ultramediaremote.coreaudio-spectrum",
         qos: .userInteractive
     )
     private let lock = NSLock()
