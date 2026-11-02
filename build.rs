@@ -25,14 +25,13 @@ fn main() {
     // does not otherwise invalidate the shared archive when `-DUMR_SPECTRUM`
     // changes between default and feature-enabled Cargo builds.
     let spectrum_enabled = env::var_os("CARGO_FEATURE_SPECTRUM").is_some();
-    let swift_scratch_dir = swift_package_dir.join(".build-cargo").join(format!(
-        "{swift_build_config}-{}",
-        if spectrum_enabled {
-            "spectrum"
-        } else {
-            "default"
-        }
-    ));
+    println!("cargo:rerun-if-env-changed=ULTRA_MEDIA_REMOTE_SCRATCH");
+    let swift_scratch_dir = swift_scratch_dir(
+        &swift_package_dir,
+        env::var_os("ULTRA_MEDIA_REMOTE_SCRATCH").map(PathBuf::from),
+        swift_build_config,
+        spectrum_enabled,
+    );
     let mut extra_args = Vec::new();
     if spectrum_enabled {
         extra_args.push("-Xswiftc".to_string());
@@ -89,4 +88,56 @@ fn main() {
     // but the compiler still emits a reference to @rpath/libswift_Concurrency.dylib.
     // Add /usr/lib/swift as an rpath so the loader can resolve it from the dyld cache.
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+}
+
+/// Resolves the SwiftPM scratch directory. The default stays inside the crate's
+/// `native/UltraMediaRemote/.build-cargo`, keyed by config and feature. A build
+/// that shares this checkout with another path can set
+/// `ULTRA_MEDIA_REMOTE_SCRATCH` to a private root; the config and feature
+/// suffix are still applied beneath it so variants stay isolated.
+fn swift_scratch_dir(
+    swift_package_dir: &std::path::Path,
+    override_root: Option<PathBuf>,
+    swift_build_config: &str,
+    spectrum_enabled: bool,
+) -> PathBuf {
+    let root = override_root
+        .unwrap_or_else(|| swift_package_dir.join(".build-cargo"));
+    root.join(format!(
+        "{swift_build_config}-{}",
+        if spectrum_enabled { "spectrum" } else { "default" }
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::swift_scratch_dir;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn default_scratch_stays_in_crate_and_keys_by_config_and_feature() {
+        let pkg = Path::new("/crate/native/UltraMediaRemote");
+        assert_eq!(
+            swift_scratch_dir(pkg, None, "debug", false),
+            pkg.join(".build-cargo/debug-default")
+        );
+        assert_eq!(
+            swift_scratch_dir(pkg, None, "release", true),
+            pkg.join(".build-cargo/release-spectrum")
+        );
+    }
+
+    #[test]
+    fn override_root_is_used_for_every_variant() {
+        let pkg = Path::new("/crate/native/UltraMediaRemote");
+        let root = PathBuf::from("/private/scratch");
+        assert_eq!(
+            swift_scratch_dir(pkg, Some(root.clone()), "debug", true),
+            root.join("debug-spectrum")
+        );
+        assert_eq!(
+            swift_scratch_dir(pkg, Some(root.clone()), "release", false),
+            root.join("release-default")
+        );
+    }
 }

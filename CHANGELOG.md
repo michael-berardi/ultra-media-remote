@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-11-02
+
+### Fixed
+
+- `build.rs` honours `ULTRA_MEDIA_REMOTE_SCRATCH` as the SwiftPM scratch root, so a build that shares a checkout with another path no longer reuses a stale module cache. The default stays `native/UltraMediaRemote/.build-cargo`. Covered by unit tests on the scratch helper.
+
 ## [0.2.4] - 2026-10-16
 
 ### Changed
