@@ -27,10 +27,10 @@ Every macOS system ships a canonical media session for Music, Spotify, QuickTime
 
 ```toml
 [dependencies]
-ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.3" }
+ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.7" }
 
 # Or, with the optional live system-output spectrum (11-band EQ data):
-# ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.3", features = ["spectrum"] }
+# ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.7", features = ["spectrum"] }
 ```
 
 ## Usage
