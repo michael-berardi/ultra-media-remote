@@ -47,12 +47,21 @@ fn main() {
         swift_package_dir.join("Sources").display()
     );
 
+    // The hermetic test launcher runs cargo under sandbox-exec and marks its
+    // child with ULTRATERM_TEST_SANDBOX=seatbelt. A nested SwiftPM sandbox then
+    // fails with sandbox_apply EPERM, so only that marker adds
+    // `--disable-sandbox`. The launcher's own profile still applies; nothing
+    // widens. Normal builds have no marker and keep SwiftPM's sandbox.
+    println!("cargo:rerun-if-env-changed={PARENT_SANDBOX_ENV}");
+    let parent_sandbox = parent_sandbox_marked(env::var_os(PARENT_SANDBOX_ENV).as_deref());
+
     let status = Command::new("swift")
         .arg("build")
         .arg("-c")
         .arg(swift_build_config)
         .arg("--scratch-path")
         .arg(&swift_scratch_dir)
+        .args(swift_sandbox_args(parent_sandbox))
         .args(&extra_args)
         .current_dir(&swift_package_dir)
         .status()
@@ -90,6 +99,25 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }
 
+/// Marker the hermetic test launcher (`scripts/test-isolated.py`) sets in the
+/// child environment when it runs under sandbox-exec.
+const PARENT_SANDBOX_ENV: &str = "ULTRATERM_TEST_SANDBOX";
+
+/// True only for the exact launcher marker value `seatbelt`.
+fn parent_sandbox_marked(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| v == "seatbelt")
+}
+
+/// Extra `swift build` arguments for the sandbox mode. Only a parent sandbox
+/// adds `--disable-sandbox`.
+fn swift_sandbox_args(parent_sandbox: bool) -> Vec<&'static str> {
+    if parent_sandbox {
+        vec!["--disable-sandbox"]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Resolves the SwiftPM scratch directory. The default stays inside the crate's
 /// `native/UltraMediaRemote/.build-cargo`, keyed by config and feature. A build
 /// that shares this checkout with another path can set
@@ -101,18 +129,41 @@ fn swift_scratch_dir(
     swift_build_config: &str,
     spectrum_enabled: bool,
 ) -> PathBuf {
-    let root = override_root
-        .unwrap_or_else(|| swift_package_dir.join(".build-cargo"));
+    let root = override_root.unwrap_or_else(|| swift_package_dir.join(".build-cargo"));
     root.join(format!(
         "{swift_build_config}-{}",
-        if spectrum_enabled { "spectrum" } else { "default" }
+        if spectrum_enabled {
+            "spectrum"
+        } else {
+            "default"
+        }
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::swift_scratch_dir;
+    use super::{parent_sandbox_marked, swift_sandbox_args, swift_scratch_dir};
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn only_the_launcher_seatbelt_marker_counts_as_parent_sandbox() {
+        assert!(parent_sandbox_marked(Some(OsStr::new("seatbelt"))));
+        assert!(!parent_sandbox_marked(Some(OsStr::new(""))));
+        assert!(!parent_sandbox_marked(Some(OsStr::new("1"))));
+        assert!(!parent_sandbox_marked(Some(OsStr::new("seatbelt-x"))));
+        assert!(!parent_sandbox_marked(None));
+    }
+
+    #[test]
+    fn parent_sandbox_disables_nested_swiftpm_sandbox() {
+        assert_eq!(swift_sandbox_args(true), vec!["--disable-sandbox"]);
+    }
+
+    #[test]
+    fn normal_build_keeps_swiftpm_sandbox() {
+        assert!(swift_sandbox_args(false).is_empty());
+    }
 
     #[test]
     fn default_scratch_stays_in_crate_and_keys_by_config_and_feature() {
