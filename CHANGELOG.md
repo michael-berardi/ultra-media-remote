@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-11-07
+
+### Fixed
+
+- `build.rs` adds `--disable-sandbox` to the nested `swift build` only when the hermetic test launcher marks its child with `ULTRATERM_TEST_SANDBOX=seatbelt`. A SwiftPM sandbox nested under that launcher failed with `sandbox_apply` EPERM. Normal builds keep SwiftPM's sandbox; the launcher's own profile is unchanged.
+
 ## [0.2.5] - 2026-11-02
 
 ### Fixed
