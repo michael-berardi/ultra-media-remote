@@ -202,3 +202,7 @@ The CoreAudio process-tap lifecycle was informed by
 [AudioCap](https://github.com/insidegui/AudioCap) (© 2024 Guilherme Rambo);
 its permissive license is reproduced at
 [`third_party/AudioCap-LICENSE`](third_party/AudioCap-LICENSE).
+
+---
+
+Part of [Pareto Cybernetics](https://paretocybernetics.com/): free, private, open-source tools for working with AI agents.
