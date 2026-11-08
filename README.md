@@ -205,4 +205,4 @@ its permissive license is reproduced at
 
 ---
 
-Part of [Pareto Cybernetics](https://paretocybernetics.com/): free, private, open-source tools for working with AI agents.
+Part of [Pareto Cybernetics](https://paretocybernetics.com/projects/ultra-media-remote/): free, private, open-source tools for working with AI agents.
