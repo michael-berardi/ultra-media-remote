@@ -1,12 +1,10 @@
 # ultra-media-remote
 
+[![Latest release](https://img.shields.io/github/v/release/michael-berardi/ultra-media-remote?label=release)](https://github.com/michael-berardi/ultra-media-remote/releases/latest) [![MIT License](https://img.shields.io/github/license/michael-berardi/ultra-media-remote)](LICENSE) ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black) ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
+
 Read macOS Now Playing metadata and control playback from Rust. For desktop
 apps that need track details, artwork, transport controls, or output volume
 without separate integrations for each player.
-
-Requires macOS 14+ and Rust plus the Swift toolchain. Builds are verified on
-Apple silicon. The Swift bridge loads Apple's private MediaRemote framework
-at runtime; it is not a Mac App Store API. Non-macOS builds use native stubs.
 
 ## Install
 
@@ -15,6 +13,10 @@ From your Rust project:
 ```sh
 cargo add ultra-media-remote --git https://github.com/michael-berardi/ultra-media-remote --tag v0.2.7
 ```
+
+Requires macOS 14+ and Rust plus the Swift toolchain. Builds are verified on
+Apple silicon. The Swift bridge loads Apple's private MediaRemote framework
+at runtime; it is not a Mac App Store API. Non-macOS builds use native stubs.
 
 Cargo builds and links the Swift component automatically. Releases currently
 contain source, not prebuilt libraries or installers.
@@ -159,3 +161,7 @@ The CoreAudio process-tap lifecycle was informed by
 [AudioCap](https://github.com/insidegui/AudioCap) (© 2024 Guilherme Rambo);
 its permissive license is reproduced at
 [`third_party/AudioCap-LICENSE`](third_party/AudioCap-LICENSE).
+
+---
+
+Part of [Pareto Cybernetics](https://paretocybernetics.com/projects/ultra-media-remote/): free, private, open-source tools for working with AI agents.
