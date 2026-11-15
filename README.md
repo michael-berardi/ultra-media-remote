@@ -1,194 +1,151 @@
 # ultra-media-remote
 
-[![Latest release](https://img.shields.io/github/v/release/michael-berardi/ultra-media-remote?label=release)](https://github.com/michael-berardi/ultra-media-remote/releases/latest) [![MIT License](https://img.shields.io/github/license/michael-berardi/ultra-media-remote)](LICENSE) ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black) ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
+Read macOS Now Playing metadata and control playback from Rust. For desktop
+apps that need track details, artwork, transport controls, or output volume
+without separate integrations for each player.
 
-**Read macOS “Now Playing” info, artwork, and transport state from a safe Rust API without statically linking Apple's private framework.**
-
-Every macOS system ships a canonical media session for Music, Spotify, QuickTime, browsers, and other players. `ultra-media-remote` uses two runtime paths: a staged BSD-licensed MediaRemoteAdapter launched through `/usr/bin/perl` for complete modern-macOS metadata, and a small Swift `dlopen`/`dlsym` shim as the direct fallback and transport layer. Missing frameworks, symbols, adapter files, or sessions degrade to `None`/`false` instead of crashing or fabricating data.
-
-## Features
-
-- **Reusable media snapshot**: `media_snapshot(timeout)` composes Now Playing, transport capabilities, and default-output volume without app-specific player assumptions.
-- **Now Playing snapshot**: title, artist, album, artwork, owning app name/bundle ID/PID, elapsed/duration seconds, and playing state as a serde-serializable struct.
-- **Playback control**: play/pause, next, previous, and absolute timeline seeking with adapter-first delivery and direct runtime fallback.
-- **Capability discovery**: per-command support/enabled state via MediaRemote's command-info APIs, including like/dislike only when the player advertises a deliverable rating command.
-- **Confirmed video identifiers**: media/content identifiers and strict YouTube ID extraction; conflicting identifiers are rejected. External video-window frame capture is not available.
-- **Output volume**: read or set the default CoreAudio output scalar in the normalized range [0, 1].
-- **Live updates** (optional): poll-based subscription delivering snapshots when they change.
-- **Graceful degradation**: unavailable frameworks yield `None`/`false`, never fake data. Non-macOS targets compile to stubs.
-
-## Requirements
-
-- macOS 14+ (arm64). The Swift toolchain (`swift build`) must be installed; the crate builds its Swift component automatically through `build.rs`.
-- On non-macOS hosts the crate compiles, but every query reports unavailable.
-- **macOS 15.4+ metadata requires the staged adapter and a Developer ID signature.** An ad-hoc-signed `MediaRemoteAdapter.framework` loads, but MediaRemote returns empty sessions. See [Staging the adapter](#staging-the-adapter-macos-154-metadata).
+Requires macOS 14+ and Rust plus the Swift toolchain. Builds are verified on
+Apple silicon. The Swift bridge loads Apple's private MediaRemote framework
+at runtime; it is not a Mac App Store API. Non-macOS builds use native stubs.
 
 ## Install
 
-```toml
-[dependencies]
-ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.7" }
+From your Rust project:
 
-# Or, with the optional live system-output spectrum (11-band EQ data):
-# ultra-media-remote = { git = "https://github.com/michael-berardi/ultra-media-remote", tag = "v0.2.7", features = ["spectrum"] }
+```sh
+cargo add ultra-media-remote --git https://github.com/michael-berardi/ultra-media-remote --tag v0.2.7
 ```
 
-## Usage
+Cargo builds and links the Swift component automatically. Releases currently
+contain source, not prebuilt libraries or installers.
+
+**On macOS 15.4+, full metadata needs a separately staged, Developer ID-signed
+adapter.** Installing the crate alone does not provide it. See
+[Adapter setup](#adapter-setup).
+
+## First snapshot
 
 ```rust
 use std::time::Duration;
-use ultra_media_remote::{
-    media_snapshot, now_playing_fetch, output_volume, seek, set_output_volume,
-    transport_capabilities, transport_send, TransportCommand,
-};
+use ultra_media_remote::media_snapshot;
 
-// Current track
-if let Some(np) = now_playing_fetch(Duration::from_secs(1)) {
-    println!("{} — {} ({:?})", np.title.as_deref().unwrap_or("?"), np.artist.as_deref().unwrap_or("?"), np.app_name);
-}
-
-// Transport
-let caps = transport_capabilities();
-if caps.next {
-    transport_send(TransportCommand::Next);
-}
-let _ = seek(90.0); // absolute playback position in seconds
-
-// Reusable combined state and default-output volume
-let media = media_snapshot(Duration::from_secs(1));
-if let Some(volume) = media.output_volume {
-    println!("system output volume: {volume:.2}");
-}
-if let Some(volume) = output_volume() {
-    let _ = set_output_volume(volume);
-}
-let _sub = ultra_media_remote::now_playing_subscribe(Duration::from_millis(500), |update| {
-    // Some(snapshot) on change, None when nothing is playing anymore.
-});
-```
-
-### Live spectrum (feature `spectrum`)
-
-```rust
-// Run the request call only from an explicit user action.
-if !ultra_media_remote::spectrum_permission_granted()
-    && !ultra_media_remote::spectrum_request_permission()
-{
-    return;
-}
-let bands = ultra_media_remote::spectrum_start()?; // macOS 15+, access granted
-loop {
-    if let Some(levels) = bands.fetch() {
-        // 11 normalized levels [0, 1] for 63 Hz .. 14 kHz, ready to render.
+fn main() {
+    let snapshot = media_snapshot(Duration::from_secs(1));
+    if let Some(track) = snapshot.now_playing {
+        println!("{}", track.title.as_deref().unwrap_or("Unknown title"));
+    } else {
+        println!("No metadata available");
     }
 }
 ```
 
-Hosts migrating a durable, previously enabled EQ preference can use
-`spectrum_start_with_existing_consent()` to start the CoreAudio global-output
-tap without re-requesting Screen Recording. Call it only for persisted user
-consent; first-run clients should keep the guarded preflight/request flow above.
+From a checkout, `cargo run --example nowplaying` prints availability,
+metadata JSON when available, and transport capabilities. Optional fields
+remain absent when the player supplies no value.
 
-### Example: print Now Playing JSON
+## API and limits
 
-```console
-$ cargo run --example nowplaying
-```
+- `now_playing_fetch(timeout)` reads title, artist, album, artwork, owning app,
+  playback timing, and identifiers. Adapter results are cached for two seconds.
+  The timeout covers only the direct Swift query, not the adapter subprocess.
+- `media_snapshot(timeout)` combines metadata, transport capabilities, and
+  default-output volume. These are separate queries, not an atomic snapshot.
+- `transport_send(TransportCommand::PlayPause)` also supports `Next`,
+  `Previous`, `Like`, and `Dislike`. `seek(seconds)` uses an absolute position.
+  Both prefer the adapter, then fall back to direct MediaRemote access.
+- `transport_capabilities()` uses supported/enabled command information when
+  available. A staged adapter enables the standard play/pause, next, and
+  previous flags without checking the player's support. Rating flags require
+  advertised commands and an available send path. Delivery can still fail.
+- `output_volume()` and `set_output_volume(value)` use the default CoreAudio
+  output device; values are in `[0, 1]`. Devices without scalar controls may
+  report unavailable.
+- `now_playing_subscribe(interval, callback)` polls the **direct Swift path**,
+  not the adapter. It may therefore miss modern-macOS sessions that a fetch
+  can read. Dropping its handle unsubscribes; intervals below 50 ms are clamped.
+- YouTube IDs are extracted from explicit metadata identifiers; conflicts are
+  rejected. External video-window capture is not provided.
 
-A live macOS 26 verification with **“Slip” by Autechre** returned real track metadata and cover art. The base64 payload is shortened here only for readability:
+Unavailable operations normally return `None` or `false`. Private framework
+symbols and OS entitlement rules can change; successful loading does not
+promise a usable media session. Do not run blocking fetches on your UI thread.
 
-```json
-{
-  "title": "Slip",
-  "artist": "Autechre",
-  "artwork_data_url": "data:image/jpeg;base64,<artwork omitted>"
-}
-```
+## Adapter setup
 
-Fields are optional: players omit what they do not report, and unknown values are dropped rather than guessed. When nothing plays, the example prints an honest “no now-playing information” message. Transport capabilities reflect the active system session.
+The vendored [MediaRemoteAdapter](third_party/mediaremote-adapter) is launched
+through `/usr/bin/perl` for metadata **and transport**. Its system entitlement
+provides the modern-macOS metadata path. Build with CMake and the Xcode toolchain:
 
-> **Platform note:** direct `MediaRemote.framework` access through `dlopen` remains available as a fallback, but Apple restricts direct `MRMediaRemoteGetNowPlayingInfo` replies on macOS 15.4 and later. The crate therefore tries the bundled BSD-licensed [MediaRemoteAdapter](third_party/mediaremote-adapter) first. Its `/usr/bin/perl` launcher supplies the system entitlement required by modern macOS, allowing `now_playing_fetch` to return full metadata, including artwork, when both adapter files are staged correctly.
->
-> **A Developer ID signature on `MediaRemoteAdapter.framework` is mandatory for modern-macOS metadata.** Ad-hoc signing is insufficient: the framework loads, but queries return empty sessions. If the adapter is absent or returns no usable session, the crate falls back to direct runtime MediaRemote access and still reports `None` rather than fabricating data.
-
-## Trust & security notes
-
-- This crate talks to **`MediaRemote.framework`, a private Apple framework**, located at `/System/Library/PrivateFrameworks/MediaRemote.framework`. It is loaded at runtime with `dlopen` and accessed exclusively through `dlsym`-resolved C entry points; nothing from the framework is statically linked into your binary.
-- Because the framework is private, Apple may remove or change symbols in any macOS release. The design assumption is that missing pieces disable features individually — availability checks precede every operation, and failures surface as `false`/`None`, never as fabricated results or crashes.
-- Reading Now Playing metadata and sending transport commands does not require special TCC permissions today, but treat that as an implementation detail of macOS, not a guarantee. Apps distributed through the Mac App Store should not rely on private frameworks.
-- The Swift component only uses public AppKit/Foundation APIs besides the dlopen'd MediaRemote symbols (for example, `NSRunningApplication` to resolve the owning app's name and bundle ID).
-- The BSD-licensed adapter is launched only for metadata reads through `/usr/bin/perl`. Its stdout is size-bounded and parsed as untrusted JSON; artwork must declare an `image/` MIME type and stay within the crate's 1 MiB base64 limit.
-
-## Staging the adapter (macOS 15.4+ metadata and transport)
-
-Transport delivery also prefers the staged MediaRemoteAdapter (`send COMMAND` with the same zero-based command IDs), falling back to the dlopen'd send API; `play_pause` capability is reported when either send path exists.
-
-The adapter has two parts that must ship with your app:
-
-- `mediaremote-adapter.pl` — the loader script
-- `MediaRemoteAdapter.framework/` — a dylib framework built from `third_party/mediaremote-adapter`
-
-Build the framework once from the vendored source (requires cmake + Xcode toolchain):
-
-```console
+```sh
 cmake -S third_party/mediaremote-adapter -B build/adapter -DCMAKE_BUILD_TYPE=Release
-cmake --build build/adapter
-# -> build/adapter/MediaRemoteAdapter.framework
+cmake --build build/adapter --parallel 4
 ```
 
-Then sign the framework. On macOS 15.4+ (observed on macOS 26) MediaRemote only serves Now Playing data when the loaded dylib carries a valid code signature; an ad-hoc signature loads fine but every query returns an empty session:
+CMake ad-hoc signs the framework automatically. For distribution, replace that
+signature with your Developer ID signature:
 
-
-> **Do not use `codesign --sign -` for a release or metadata test.** Ad-hoc signing produces empty Now Playing sessions on modern macOS even though the framework loads successfully.
-
-```console
+```sh
 codesign --force --options runtime \
   --sign "Developer ID Application: <Your Team Name> (<Team ID>)" \
   build/adapter/MediaRemoteAdapter.framework
 ```
 
-Stage both parts next to your binary, or in your app bundle's Resources:
+The existing macOS 26 verification found empty sessions with an ad-hoc
+signature; use a valid Developer ID signature for modern-macOS metadata.
+Signing does not guarantee compatibility with future OS versions.
 
-```text
-myapp                          # your binary
-mediaremote/
-  mediaremote-adapter.pl
-  MediaRemoteAdapter.framework/
+Ship these two items in a `mediaremote` directory next to your executable,
+or in `MyApp.app/Contents/Resources/mediaremote/`:
 
-# or inside an app bundle:
-MyApp.app/Contents/Resources/mediaremote/
-  mediaremote-adapter.pl
-  MediaRemoteAdapter.framework/
-```
+- `third_party/mediaremote-adapter/bin/mediaremote-adapter.pl`
+- `build/adapter/MediaRemoteAdapter.framework/`
 
-Discovery order: the `ULTRA_MEDIA_REMOTE_ADAPTER_DIR` environment variable overrides everything; otherwise `<exe dir>/mediaremote`, then `<exe dir>/../Resources/mediaremote`. A directory counts only when it contains both files. When the adapter is not found or reports no session, [`now_playing_fetch`] silently falls back to the direct MediaRemote path.
+Discovery checks `ULTRA_MEDIA_REMOTE_ADAPTER_DIR`, then
+`<exe dir>/mediaremote`, then `<exe dir>/../Resources/mediaremote`. It uses the
+first directory containing both items; an invalid environment override does
+not disable the other candidates. Missing or unusable adapter metadata falls
+back to the direct path.
 
-## Spectrum feature notes
+Only stage trusted adapter files. Adapter JSON is treated as untrusted input:
+stdout is capped at 1.5 MiB, and artwork needs an `image/` MIME type with at
+most 1 MiB of base64 data. Adapter subprocesses have no wall-clock deadline.
 
-- The spectrum is an opt-in cargo feature. Without it, no ScreenCaptureKit code is compiled into your binary at all.
-- It captures **system output audio** through a ScreenCaptureKit audio tap (`capturesAudio`, microphone excluded, the calling process's own audio excluded), then analyzes fixed frequency bins with Goertzel magnitudes — identical math to the reference implementation this crate was extracted from, so visuals match.
-- **Permission:** ScreenCaptureKit requires **Screen Recording** permission (System Settings → Privacy & Security → Screen Recording) even for audio-only taps. Call `spectrum_permission_granted()` for a non-prompting preflight. `spectrum_start()` returns `None` until access is already granted and never requests it. Call `spectrum_request_permission()` only from an explicit consent action when your app wants macOS to show the system prompt.
-- Runtime requirement: macOS 15 or newer; on older systems `spectrum_start` returns `None`.
+## Optional spectrum
+
+Enable the Cargo feature `spectrum` for 11 normalized output-audio bands from
+63 Hz to 14 kHz. It requires macOS 15+. Without the feature, the
+ScreenCaptureKit implementation is not compiled.
+
+`spectrum_permission_granted()` checks Screen Recording access without a
+prompt. Call `spectrum_request_permission()` only from an explicit user action.
+`spectrum_start()` returns `None` until access is granted and never requests it.
+Keep the returned handle and call `fetch()` to read levels; dropping it stops
+capture. The ScreenCaptureKit path excludes microphone and the caller's audio.
+
+For hosts migrating persisted user consent,
+`spectrum_start_with_existing_consent()` uses a CoreAudio global-output tap
+instead. It does not perform the Screen Recording preflight; use it only for
+previously granted consent, not to bypass first-run permission handling.
+See [the spectrum example](examples/spectrum.rs).
 
 ## Development
 
-```console
-cargo build                        # compiles the Swift package, links it, builds the crate
-cargo test                         # Rust unit tests for pure logic
-cd native/UltraMediaRemote && swift test -Xswiftc -DUMR_SPECTRUM   # spectrum analysis tests
-cargo run --example nowplaying
+```sh
+cargo build -j4
+cargo fmt --check
+cargo clippy -j4 --all-targets -- -D warnings
+cargo test -j4
+(cd native/UltraMediaRemote && swift test -j 4 -Xswiftc -DUMR_SPECTRUM)
 ```
 
-Layout:
+`src/lib.rs` contains Rust wrappers and mapping tests;
+`native/UltraMediaRemote/` contains the Swift static library and analysis tests.
+`build.rs` selects a separate Swift scratch directory for each profile/feature
+variant; `ULTRA_MEDIA_REMOTE_SCRATCH` overrides its root. Cargo's job limit does
+not propagate to the nested Swift build; resource-limited builders should
+also constrain their Swift invocation.
 
-- `native/UltraMediaRemote/` — Swift package producing `libUltraMediaRemote.a` with the `umr_*` C ABI (`dlopen` controller, thread-safe handoff boxes, polling subscriptions).
-- `src/lib.rs` — FFI declarations, safe wrappers, pure mapping logic and tests.
-- `build.rs` — invokes `swift build -c debug|release` matching the Cargo profile and wires up link flags (including `/usr/lib/swift` rpath for the concurrency runtime).
-- `third_party/mediaremote-adapter/` — vendored BSD-3-Clause adapter providing the macOS 15.4+ metadata path.
-
-## Contributing and security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License
 
@@ -202,7 +159,3 @@ The CoreAudio process-tap lifecycle was informed by
 [AudioCap](https://github.com/insidegui/AudioCap) (© 2024 Guilherme Rambo);
 its permissive license is reproduced at
 [`third_party/AudioCap-LICENSE`](third_party/AudioCap-LICENSE).
-
----
-
-Part of [Pareto Cybernetics](https://paretocybernetics.com/projects/ultra-media-remote/): free, private, open-source tools for working with AI agents.
