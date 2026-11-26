@@ -1,4 +1,6 @@
 /target
+/dist/
+/.release-build/
 /native/**/.build/
 /native/**/.build-cargo/
 /native/**/.swiftpm/

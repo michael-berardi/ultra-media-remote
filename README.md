@@ -8,21 +8,37 @@ without separate integrations for each player.
 
 ## Install
 
-From your Rust project:
+macOS 14+ on Apple silicon, with a signed, notarized and stapled CLI app bundle and staged adapter:
 
 ```sh
-cargo add ultra-media-remote --git https://github.com/michael-berardi/ultra-media-remote --tag v0.2.7
+curl -fsSL https://github.com/michael-berardi/ultra-media-remote/releases/latest/download/install.sh | sh
+```
+
+The installer verifies `SHA256SUMS`, installs into
+`~/.local/share/ultra-media-remote/<version>` and adds a shim at
+`~/.local/bin/ultra-media-remote` (add that directory to `PATH`). It refuses to
+replace a binary it did not install. Pin a version with
+`ULTRA_MEDIA_REMOTE_VERSION=0.3.0`, or point at a local mirror with
+`ULTRA_MEDIA_REMOTE_RELEASE_BASE`; `ULTRA_MEDIA_REMOTE_HOME` and
+`ULTRA_MEDIA_REMOTE_BIN_DIR` change the destinations. Other platforms are
+refused with a clear message.
+
+From your Rust project, without the CLI:
+
+```sh
+cargo add ultra-media-remote --git https://github.com/michael-berardi/ultra-media-remote --tag v0.3.0
 ```
 
 Requires macOS 14+ and Rust plus the Swift toolchain. Builds are verified on
 Apple silicon. The Swift bridge loads Apple's private MediaRemote framework
 at runtime; it is not a Mac App Store API. Non-macOS builds use native stubs.
 
-Cargo builds and links the Swift component automatically. Releases currently
-contain source, not prebuilt libraries or installers.
+Cargo builds and links the Swift component automatically. GitHub releases ship
+a macOS arm64 tarball (signed CLI app bundle, staged adapter, licenses),
+`install.sh`, and `SHA256SUMS`.
 
-**On macOS 15.4+, full metadata needs a separately staged, Developer ID-signed
-adapter.** Installing the crate alone does not provide it. See
+**On macOS 15.4+, full metadata needs a Developer ID-signed adapter.** The
+installer stages it for the CLI; a Cargo-only build must stage it itself. See
 [Adapter setup](#adapter-setup).
 
 ## First snapshot
@@ -44,6 +60,29 @@ fn main() {
 From a checkout, `cargo run --example nowplaying` prints availability,
 metadata JSON when available, and transport capabilities. Optional fields
 remain absent when the player supplies no value.
+
+## CLI
+
+Every command prints JSON on stdout and sends diagnostics to stderr:
+
+```sh
+ultra-media-remote now            # Now Playing object, or null when idle
+ultra-media-remote snapshot       # Now Playing + capabilities + volume
+ultra-media-remote caps           # transport capabilities
+ultra-media-remote play-pause     # also: next, previous
+ultra-media-remote seek 42        # absolute position in seconds
+ultra-media-remote volume         # {"volume":number|null}
+ultra-media-remote volume 0.5     # set default output volume
+ultra-media-remote watch          # one JSON line each time Now Playing changes
+ultra-media-remote --version      # ultra-media-remote <version>
+ultra-media-remote --help
+```
+
+Transport commands print `{"command":"...","sent":true|false}` and exit 1
+when delivery failed; invalid arguments exit 2. The CLI finds its adapter next
+to the binary (`mediaremote/` or `lib/mediaremote/`), in an app bundle's
+`Contents/Resources/mediaremote/`, or through
+`ULTRA_MEDIA_REMOTE_ADAPTER_DIR`.
 
 ## API and limits
 
@@ -103,10 +142,13 @@ or in `MyApp.app/Contents/Resources/mediaremote/`:
 - `build/adapter/MediaRemoteAdapter.framework/`
 
 Discovery checks `ULTRA_MEDIA_REMOTE_ADAPTER_DIR`, then
-`<exe dir>/mediaremote`, then `<exe dir>/../Resources/mediaremote`. It uses the
-first directory containing both items; an invalid environment override does
-not disable the other candidates. Missing or unusable adapter metadata falls
-back to the direct path.
+`<exe dir>/mediaremote`, `<exe dir>/lib/mediaremote`, and the
+`Resources/mediaremote` or `lib/mediaremote` directory of the executable's
+parent. The installer places the adapter in
+`<version>/ultra-media-remote.app/Contents/Resources/mediaremote/`. It uses
+the first directory containing both items; an invalid environment override
+does not disable the other candidates. Missing or unusable adapter metadata
+falls back to the direct path.
 
 Only stage trusted adapter files. Adapter JSON is treated as untrusted input:
 stdout is capped at 1.5 MiB, and artwork needs an `image/` MIME type with at
@@ -138,6 +180,9 @@ cargo fmt --check
 cargo clippy -j4 --all-targets -- -D warnings
 cargo test -j4
 (cd native/UltraMediaRemote && swift test -j 4 -Xswiftc -DUMR_SPECTRUM)
+# Installer test against a locally built release dir:
+./scripts/build-release.sh   # requires signing identity and NOTARY_PROFILE in env
+ULTRA_MEDIA_REMOTE_TEST_RELEASE_DIR=dist/release cargo test --test installer
 ```
 
 `src/lib.rs` contains Rust wrappers and mapping tests;
@@ -151,7 +196,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT © 2026 Pareto Cybernetics. See [LICENSE](LICENSE).
+MIT © 2026 Pareto Cybernetics. See [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Third-party notices
 

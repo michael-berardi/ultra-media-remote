@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-26
+
+### Added
+
+- A signed macOS arm64 `ultra-media-remote` CLI with `now`, `snapshot`, `caps`,
+  `play-pause`, `next`, `previous`, `seek`, `volume`, `watch`, `--version` and
+  `--help`. Every command emits JSON, with no new dependencies.
+- `scripts/install.sh`: a one-line installer that verifies SHA-256 checksums,
+  installs into `~/.local/share/ultra-media-remote/<version>` with a shim in
+  `~/.local/bin`, refuses foreign files, and supports version/base/directory
+  environment overrides. Non-macOS hosts get a clear error.
+- `scripts/build-release.sh`: builds a Developer ID signed, notarized and
+  stapled CLI app bundle with the hardened-runtime MediaRemoteAdapter
+  framework, and produces a tarball plus `install.sh` and `SHA256SUMS`.
+- Adapter discovery now also checks `lib/mediaremote` next to (or one level
+  above) the executable, the layout used by the installer.
+- An end-to-end installer test that works against a local release directory,
+  including the real release assets via `ULTRA_MEDIA_REMOTE_TEST_RELEASE_DIR`.
+
+### Changed
+
+- Version 0.3.0; the library API is unchanged.
+
 ## [0.2.7] - 2026-11-07
 
 ### Fixed

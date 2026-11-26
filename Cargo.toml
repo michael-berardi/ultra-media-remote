@@ -1,6 +1,6 @@
 [package]
 name = "ultra-media-remote"
-version = "0.2.7"
+version = "0.3.0"
 edition = "2021"
 description = "macOS Now Playing info and media transport control through runtime-only MediaRemote access, via a small Swift static library."
 license = "MIT"
@@ -20,6 +20,10 @@ serde_json = "1"
 # Opt-in live system-output spectrum (11-band EQ data). Requires macOS 15+ at
 # runtime and Screen Recording permission for the calling app.
 spectrum = []
+
+[[bin]]
+name = "ultra-media-remote"
+path = "src/bin/ultra-media-remote.rs"
 
 [[example]]
 name = "nowplaying"
