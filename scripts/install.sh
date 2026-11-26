@@ -84,8 +84,17 @@ got=$("$BIN" --version 2>&1 </dev/null) ||
   die "the downloaded binary does not start: $got"
 case "$got" in "ultra-media-remote $VERSION"*) ;; *) die "the download reports '$got', not $VERSION" ;; esac
 
-mkdir -p "$HOME_DIR" "$BIN_DIR"
-chmod 700 "$HOME_DIR" 2>/dev/null || true
+if [ -d "$HOME_DIR" ]; then
+  CREATED_HOME=0
+else
+  mkdir -p "$HOME_DIR" || die "cannot create $HOME_DIR"
+  CREATED_HOME=1
+fi
+mkdir -p "$BIN_DIR" || die "cannot create $BIN_DIR"
+# Respect the permissions of a home directory that already existed.
+if [ "$CREATED_HOME" -eq 1 ]; then
+  chmod 700 "$HOME_DIR" 2>/dev/null || true
+fi
 REL="$HOME_DIR/$VERSION"
 CURRENT="$HOME_DIR/current"
 SHIM="$BIN_DIR/ultra-media-remote"

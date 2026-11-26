@@ -138,7 +138,10 @@ fn installer(release: &Path, home: &Path) -> Output {
         .env(
             "ULTRA_MEDIA_REMOTE_RELEASE_BASE",
             format!("file://{}", release.display()),
-        ))
+        )
+        .env_remove("ULTRA_MEDIA_REMOTE_HOME")
+        .env_remove("ULTRA_MEDIA_REMOTE_BIN_DIR")
+        .env_remove("ULTRA_MEDIA_REMOTE_VERSION"))
 }
 
 fn assert_success(output: &Output, label: &str) {
@@ -155,9 +158,15 @@ fn installer_works_from_a_local_release_dir_with_a_temp_home() {
     let release = release_dir(&temp);
     let home = temp.path().join("home");
     fs::create_dir_all(&home).expect("create home");
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).expect("set home mode");
 
     let output = installer(&release, &home);
     assert_success(&output, "installer");
+    assert_eq!(
+        fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "installer changed the mode of an existing home"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains(env!("CARGO_PKG_VERSION")),

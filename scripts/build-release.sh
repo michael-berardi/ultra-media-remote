@@ -21,14 +21,41 @@ command -v cmake >/dev/null || die "cmake is unavailable"
 command -v codesign >/dev/null || die "codesign is unavailable"
 command -v ditto >/dev/null || die "ditto is unavailable"
 command -v shasum >/dev/null || die "shasum is unavailable"
+command -v realpath >/dev/null || die "realpath is unavailable"
 
 IDENTITY="${ULTRA_MEDIA_REMOTE_SIGNING_IDENTITY:?Set ULTRA_MEDIA_REMOTE_SIGNING_IDENTITY to a Developer ID Application identity}"
 NOTARY_PROFILE="${NOTARY_PROFILE:?Set NOTARY_PROFILE to a notarytool keychain profile}"
 case "$IDENTITY" in "Developer ID Application:"*) ;; *) die "the signing identity must be a Developer ID Application identity" ;; esac
-TEAM=$(printf '%s' "$IDENTITY" | sed -n 's/.*(\([[:upper:]]\{10\}\))$/\1/p')
+TEAM=$(printf '%s' "$IDENTITY" | sed -n 's/.*(\([[:alnum:]]\{10\}\))$/\1/p')
+[ -n "$TEAM" ] || die "cannot read a 10-character Team ID from the signing identity"
 
-OUT="${1:-dist/release}"
-case "$OUT" in /*) ;; *) OUT="$(pwd)/$OUT" ;;
+# Resolve the output path before any destructive removal. Symlinks in an
+# existing prefix are resolved; a missing final component is kept lexically.
+canonicalize() {
+  p=$1
+  case "$p" in /*) ;; *) p="$(pwd -P)/$p" ;; esac
+  suffix=""
+  while [ ! -e "$p" ] && [ ! -L "$p" ]; do
+    base=${p##*/}
+    parent=${p%/*}
+    [ -n "$base" ] && [ "$base" != "$p" ] || break
+    suffix="/$base$suffix"
+    p=$parent
+    [ -n "$p" ] || p=/
+  done
+  resolved=$(realpath "$p") || die "cannot resolve $1"
+  printf '%s%s\n' "$resolved" "$suffix"
+}
+
+OUT=$(canonicalize "${1:-dist/release}")
+ROOT=$(pwd -P)
+HOME_REAL=$(canonicalize "$HOME")
+[ "$OUT" != "$ROOT" ] || die "refusing to delete the checkout: $OUT"
+[ "$OUT" != "/" ] || die "refusing to delete /"
+[ "$OUT" != "$HOME_REAL" ] || die "refusing to delete the home directory: $OUT"
+case "$OUT" in
+  "$ROOT"/dist/?*) ;;
+  *) die "refusing to delete $OUT: the output must resolve under $ROOT/dist/" ;;
 esac
 VERSION=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
 [ -n "$VERSION" ] || die "cannot read the crate version"
