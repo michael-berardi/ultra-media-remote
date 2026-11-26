@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-11-26
+
+### Added
+
+- Privacy section in the README describing the absence of network calls, local
+  storage, and third-party contacts, plus how to remove build files.
+- Offline regression tests that fail if analytics/telemetry packages, network
+  clients, or third-party CDN assets are reintroduced, and that check the
+  version stays aligned across manifest, lockfile, and README.
+
+### Changed
+
+- The nested `swift build` now sets `DO_NOT_TRACK=1` for the child toolchain
+  process.
+- Removed third-party badge images from the README so reading the docs does not
+  request remote images.
+
 ## [0.2.7] - 2026-11-07
 
 ### Fixed

@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Builds the native Swift package `UltraMediaRemote` and tells Cargo where to
@@ -55,17 +55,15 @@ fn main() {
     println!("cargo:rerun-if-env-changed={PARENT_SANDBOX_ENV}");
     let parent_sandbox = parent_sandbox_marked(env::var_os(PARENT_SANDBOX_ENV).as_deref());
 
-    let status = Command::new("swift")
-        .arg("build")
-        .arg("-c")
-        .arg(swift_build_config)
-        .arg("--scratch-path")
-        .arg(&swift_scratch_dir)
-        .args(swift_sandbox_args(parent_sandbox))
-        .args(&extra_args)
-        .current_dir(&swift_package_dir)
-        .status()
-        .expect("failed to run `swift build` for UltraMediaRemote");
+    let status = swift_build_command(
+        &swift_package_dir,
+        &swift_scratch_dir,
+        swift_build_config,
+        parent_sandbox,
+        &extra_args,
+    )
+    .status()
+    .expect("failed to run `swift build` for UltraMediaRemote");
 
     if !status.success() {
         panic!("`swift build` failed for UltraMediaRemote");
@@ -97,6 +95,29 @@ fn main() {
     // but the compiler still emits a reference to @rpath/libswift_Concurrency.dylib.
     // Add /usr/lib/swift as an rpath so the loader can resolve it from the dyld cache.
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+}
+
+/// Builds the single `swift build` invocation this crate controls. Setting
+/// `DO_NOT_TRACK=1` applies the cross-tool opt-out to that child process.
+fn swift_build_command(
+    swift_package_dir: &Path,
+    scratch_dir: &Path,
+    swift_build_config: &str,
+    parent_sandbox: bool,
+    extra_args: &[String],
+) -> Command {
+    let mut command = Command::new("swift");
+    command
+        .arg("build")
+        .arg("-c")
+        .arg(swift_build_config)
+        .arg("--scratch-path")
+        .arg(scratch_dir)
+        .args(swift_sandbox_args(parent_sandbox))
+        .args(extra_args)
+        .current_dir(swift_package_dir)
+        .env("DO_NOT_TRACK", "1");
+    command
 }
 
 /// Marker the hermetic test launcher (`scripts/test-isolated.py`) sets in the
@@ -142,7 +163,9 @@ fn swift_scratch_dir(
 
 #[cfg(test)]
 mod tests {
-    use super::{parent_sandbox_marked, swift_sandbox_args, swift_scratch_dir};
+    use super::{
+        parent_sandbox_marked, swift_build_command, swift_sandbox_args, swift_scratch_dir,
+    };
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
@@ -163,6 +186,20 @@ mod tests {
     #[test]
     fn normal_build_keeps_swiftpm_sandbox() {
         assert!(swift_sandbox_args(false).is_empty());
+    }
+
+    #[test]
+    fn swift_build_sets_do_not_track() {
+        let command = swift_build_command(
+            Path::new("/crate/native/UltraMediaRemote"),
+            Path::new("/scratch/debug-default"),
+            "debug",
+            false,
+            &[],
+        );
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "DO_NOT_TRACK" && value == Some(OsStr::new("1"))));
     }
 
     #[test]

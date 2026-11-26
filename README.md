@@ -1,7 +1,5 @@
 # ultra-media-remote
 
-[![Latest release](https://img.shields.io/github/v/release/michael-berardi/ultra-media-remote?label=release)](https://github.com/michael-berardi/ultra-media-remote/releases/latest) [![MIT License](https://img.shields.io/github/license/michael-berardi/ultra-media-remote)](LICENSE) ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black) ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
-
 Read macOS Now Playing metadata and control playback from Rust. For desktop
 apps that need track details, artwork, transport controls, or output volume
 without separate integrations for each player.
@@ -11,7 +9,7 @@ without separate integrations for each player.
 From your Rust project:
 
 ```sh
-cargo add ultra-media-remote --git https://github.com/michael-berardi/ultra-media-remote --tag v0.2.7
+cargo add ultra-media-remote --git https://github.com/michael-berardi/ultra-media-remote --tag v0.2.8
 ```
 
 Requires macOS 14+ and Rust plus the Swift toolchain. Builds are verified on
@@ -24,6 +22,31 @@ contain source, not prebuilt libraries or installers.
 **On macOS 15.4+, full metadata needs a separately staged, Developer ID-signed
 adapter.** Installing the crate alone does not provide it. See
 [Adapter setup](#adapter-setup).
+
+## Privacy
+
+This library sends nothing over the network. It has no telemetry, analytics,
+crash reporting, update checks, remote configuration, or install ID, and it
+makes no outbound HTTP, DNS, or socket connections.
+
+It reads Now Playing metadata and controls playback through local macOS APIs
+(MediaRemote and CoreAudio). If you stage the optional MediaRemoteAdapter, this
+crate runs it as a local Perl subprocess. The optional `spectrum` feature reads
+system audio only after your app has Screen Recording permission. No web UI,
+network listener, or login surface ships with this crate.
+
+It stores nothing on disk: no logs, history, cache files, or credentials are
+written. Metadata and audio levels stay in memory; adapter results are cached
+for two seconds. The examples print metadata to your terminal when you run
+them. Building from source creates `target/` and
+`native/UltraMediaRemote/.build-cargo/` in the checkout; to remove all local
+files created by this crate, delete those directories (for example,
+`rm -rf target native/UltraMediaRemote/.build-cargo`).
+
+No third-party service is contacted by this library. `cargo add --git` fetches
+source from GitHub because you choose to run it, and a staged adapter is code
+you supply yourself. If your app sends track metadata elsewhere, that is your
+app's behavior, not this crate's.
 
 ## First snapshot
 
