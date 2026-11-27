@@ -353,7 +353,48 @@ fn installer_keeps_one_earlier_release_and_the_shim_follows_current() {
     fs::create_dir_all(share.join("1.0.0")).unwrap();
     let release = scripted_release(&temp, "9.3.0");
     assert_success(&installer(&release, &home), "9.3.0");
-    assert!(share.join("1.0.0").is_dir(), "foreign folder removed");
+    assert!(share.join("1.0.0").is_dir(), "unmarked folder must be kept");
     assert!(!share.join("9.1.0").exists());
     assert!(share.join("9.2.0").is_dir());
+}
+
+#[test]
+fn installer_handles_a_home_with_spaces_and_refuses_shell_metacharacters() {
+    let temp = TempDir::new("spaces");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("create home");
+    let spaced = temp.path().join("my apps/umr");
+    for version in ["9.0.0", "9.1.0", "9.2.0"] {
+        let release = scripted_release(&temp, version);
+        let output = run(Command::new("sh")
+            .arg(repo_root().join("scripts/install.sh"))
+            .env("HOME", &home)
+            .env("ULTRA_MEDIA_REMOTE_HOME", &spaced)
+            .env(
+                "ULTRA_MEDIA_REMOTE_RELEASE_BASE",
+                format!("file://{}", release.display()),
+            )
+            .env_remove("ULTRA_MEDIA_REMOTE_BIN_DIR")
+            .env_remove("ULTRA_MEDIA_REMOTE_VERSION"));
+        assert_success(&output, version);
+    }
+    assert!(!spaced.join("9.0.0").exists(), "oldest release pruned");
+    assert!(spaced.join("9.1.0").is_dir(), "rollback release kept");
+    let version = run(Command::new(home.join(".local/bin/ultra-media-remote")).arg("--version"));
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "ultra-media-remote 9.2.0"
+    );
+
+    let release = scripted_release(&temp, "9.3.0");
+    let output = run(Command::new("sh")
+        .arg(repo_root().join("scripts/install.sh"))
+        .env("HOME", &home)
+        .env("ULTRA_MEDIA_REMOTE_HOME", temp.path().join("bad$name"))
+        .env(
+            "ULTRA_MEDIA_REMOTE_RELEASE_BASE",
+            format!("file://{}", release.display()),
+        )
+        .env_remove("ULTRA_MEDIA_REMOTE_BIN_DIR"));
+    assert!(!output.status.success(), "accepted a $ in the install path");
 }

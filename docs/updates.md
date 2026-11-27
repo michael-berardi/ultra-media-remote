@@ -47,7 +47,7 @@ quiet until a newer one is released.
 | --- | --- |
 | `ultra-media-remote update` | Check now, show the new version and its notes, ask `Install 0.4.0 now? [Y/n]`, install |
 | `ultra-media-remote update --check` | Report only: exit 0 up to date, 10 update available, 1 check failed (with the cause) |
-| `ultra-media-remote update --skip` | Hide the current release's notice |
+| `ultra-media-remote update --skip` | Hide the newest release's notice |
 | `ultra-media-remote update --auto on\|off\|status` | Automatic installs (off by default) |
 | `ultra-media-remote update --notify on\|off\|status` | The daily check and notice (on by default) |
 | `ultra-media-remote update --rollback` | Switch back to the version that ran before the last update |
@@ -67,20 +67,26 @@ into `update.log` and `update --auto status`, and the notice comes back.
 `update` works on a copy from the one-line installer. It downloads the release
 archive and `SHA256SUMS` from the GitHub release into a private folder inside
 `~/.local/share/ultra-media-remote/`, and refuses the archive unless its
-SHA-256 matches. It unpacks it, checks that the new binary starts and reports
+SHA-256 matches. It unpacks it and refuses it unless `codesign --verify
+--strict --deep` accepts the app bundle as signed by the same Developer ID team
+as the copy you are running. It checks that the new binary starts and reports
 the new version, moves it to `~/.local/share/ultra-media-remote/<version>/`
 and switches the `current` link with one rename. The shim in `~/.local/bin`
 runs `current`, so a command starting at that moment runs either the old
-release or the new one. The release binary is Developer ID signed and
-notarized, so Gatekeeper checks it too.
+release or the new one. Only one update of a copy runs at a time.
 
 The release that was current stays for `update --rollback` until the new one
 has completed a command (a week at most); then it is removed. Older release
 folders are removed at once. The private download folder is deleted on success
 and failure; one left by a killed update is removed by the next update.
 
-A copy from `cargo install` or a local build is left alone: `update` prints the
-installer command to run instead.
+A copy from `cargo install` is left to Cargo: `update` prints the
+`cargo install --git … --tag vX` command to run. A local build is left alone
+and gets the installer command.
+
+`update --rollback` uses the kept release folder, even after
+`update --auto off` deleted the state file. Once the kept folder is gone it
+downloads that release again, which needs the network.
 
 ## Local files
 

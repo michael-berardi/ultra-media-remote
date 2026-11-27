@@ -2,6 +2,7 @@
 name = "ultra-media-remote"
 version = "0.3.0"
 edition = "2021"
+rust-version = "1.82"
 description = "macOS Now Playing info and media transport control through runtime-only MediaRemote access, via a small Swift static library."
 license = "MIT"
 authors = ["Pareto Cybernetics"]

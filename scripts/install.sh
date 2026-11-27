@@ -99,6 +99,14 @@ fi
 REL="$HOME_DIR/$VERSION"
 CURRENT="$HOME_DIR/current"
 SHIM="$BIN_DIR/ultra-media-remote"
+case "$HOME_DIR" in *[\"\$\`\\]*) die "the install folder path may not contain quotes, \$, backticks or backslashes: $HOME_DIR" ;; esac
+
+# Refuse before changing anything: a shim we did not write is never replaced.
+if [ -e "$SHIM" ] || [ -L "$SHIM" ]; then
+  if [ -L "$SHIM" ] || ! grep -q "$SHIM_MARKER" "$SHIM" 2>/dev/null; then
+    die "$SHIM exists and is not an ultra-media-remote installer shim; refusing to replace it"
+  fi
+fi
 
 if [ -d "$REL" ]; then
   [ -f "$REL/$MARKER" ] || die "$REL exists but was not installed by this installer; refusing to clobber it"
@@ -123,17 +131,15 @@ swap_link "$REL" "$CURRENT"
 
 # Keep the new release and the one it replaced (for 'update --rollback');
 # remove older release folders this installer made. Nothing else is touched.
+PREV_NAME=${PREV##*/}
 for old in "$HOME_DIR"/*; do
   [ -d "$old" ] && [ ! -L "$old" ] && [ -f "$old/$MARKER" ] || continue
-  case "${old##*/}" in *[!0-9.]* | .* | *..* ) continue ;; esac
-  [ "$old" = "$REL" ] || [ "$old" = "$PREV" ] || rm -rf "$old"
+  name=${old##*/}
+  case "$name" in *[!0-9.]* | .* | *..* ) continue ;; esac
+  [ "$name" = "$VERSION" ] && continue
+  [ -n "$PREV_NAME" ] && [ "$name" = "$PREV_NAME" ] && continue
+  rm -rf "$old" || say "could not remove the old release $old; remove it by hand"
 done
-
-if [ -e "$SHIM" ] || [ -L "$SHIM" ]; then
-  if [ -L "$SHIM" ] || ! grep -q "$SHIM_MARKER" "$SHIM" 2>/dev/null; then
-    die "$SHIM exists and is not an ultra-media-remote installer shim; refusing to replace it"
-  fi
-fi
 cat > "$SHIM.tmp.$$" <<WRAP
 #!/bin/sh
 $SHIM_MARKER

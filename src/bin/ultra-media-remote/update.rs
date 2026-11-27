@@ -316,12 +316,34 @@ fn release_base(version: &str) -> String {
         })
 }
 
-/// What a person can run for a copy this CLI cannot update itself.
+/// What a person can run for a copy this CLI cannot update itself: the Cargo
+/// command for a `cargo install` copy, else the one-line installer.
 fn install_hint(version: &str) -> String {
-    format!(
-        "curl -fsSL https://github.com/{}/releases/latest/download/install.sh | ULTRA_MEDIA_REMOTE_VERSION={version} sh",
-        github_slug()
-    )
+    let exe = env::current_exe().ok();
+    hint_for(exe.as_deref(), version)
+}
+
+fn hint_for(exe: Option<&Path>, version: &str) -> String {
+    let cargo = exe.is_some_and(|exe| {
+        let exe = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+        exe.parent()
+            .filter(|bin| bin.file_name() == Some("bin".as_ref()))
+            .and_then(Path::parent)
+            .is_some_and(|root| root.join(".crates2.json").is_file())
+    });
+    if cargo {
+        format!("cargo install --git {REPOSITORY} --tag v{version} --locked --force {TOOL}")
+    } else {
+        format!(
+            "curl -fsSL https://github.com/{}/releases/latest/download/install.sh | ULTRA_MEDIA_REMOTE_VERSION={version} sh",
+            github_slug()
+        )
+    }
+}
+
+/// A release folder name: plain `x.y.z`, no `v` prefix (as the installer writes).
+fn release_name(name: &str) -> bool {
+    !name.starts_with('v') && parse_version(name).is_some()
 }
 
 /// curl with no `~/.curlrc`, no cookies and the fixed User-Agent.
@@ -350,6 +372,11 @@ fn fetch(url: &str) -> Result<String, String> {
             "--max-filesize",
             "1000000",
         ])
+        .args(if url.starts_with("https://") {
+            &["--proto", "=https", "--proto-redir", "=https"][..]
+        } else {
+            &[][..]
+        })
         .args(["--header", "Accept: application/vnd.github+json", url])
         .output()
         .map_err(|e| format!("cannot run curl: {e}"))?;
@@ -640,7 +667,7 @@ fn prune_releases(home: &Path, keep: &[&Path]) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let ours = entry.file_name().to_str().and_then(parse_version).is_some()
+        let ours = entry.file_name().to_str().is_some_and(release_name)
             && entry.file_type().is_ok_and(|t| t.is_dir())
             && path.join(MARKER).is_file();
         if !ours {
@@ -724,11 +751,83 @@ fn sweep_stale_work(home: &Path, now: u64) {
     }
 }
 
+/// The Developer ID team that signed an app bundle, from `codesign -dv`.
+fn team_id(app: &Path) -> Option<String> {
+    let output = Command::new("codesign")
+        .args(["-dv", "--verbose=2"])
+        .arg(app)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="))
+        .map(str::trim)
+        .filter(|team| team.len() == 10 && team.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(str::to_owned)
+}
+
+/// Refuse an app bundle unless its signature is valid (strict, deep) and comes
+/// from the same Developer ID team as the copy that is running.
+fn verify_signature(app: &Path, team: &str) -> Result<(), String> {
+    let requirement =
+        format!("=anchor apple generic and certificate leaf[subject.OU] = \"{team}\"");
+    let output = Command::new("codesign")
+        .args(["--verify", "--strict", "--deep", "-R"])
+        .arg(&requirement)
+        .arg(app)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run codesign: {e}"))?;
+    output.status.success().then_some(()).ok_or_else(|| {
+        format!(
+            "the downloaded app is not signed by team {team}: {}; nothing was installed",
+            tail(&output.stderr)
+        )
+    })
+}
+
+/// One update at a time per install home: a lock folder made with one
+/// `mkdir`, removed on drop. A lock left by a killed update for a day is stale.
+struct Lock(PathBuf);
+
+impl Lock {
+    fn take(home: &Path) -> Result<Lock, String> {
+        let path = home.join(".update-lock");
+        for _ in 0..2 {
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(Lock(path)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    let age = fs::symlink_metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .map_or(0, |d| d.as_secs());
+                    if age < DAY {
+                        return Err("another update of this copy is running".into());
+                    }
+                    let _ = fs::remove_dir(&path);
+                }
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+        Err(format!("cannot take the update lock {}", path.display()))
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
+    }
+}
+
 /// Replaces an installer copy with another release.
 struct Installer {
     home: PathBuf,
     /// `ULTRA_MEDIA_REMOTE_RELEASE_BASE` or the GitHub release of the version.
     base: Box<dyn Fn(&str) -> String>,
+    /// The Developer ID team a new release must be signed by; `None` only in tests.
+    team: Option<String>,
 }
 
 impl Installer {
@@ -736,18 +835,40 @@ impl Installer {
         let exe = env::current_exe().map_err(|e| format!("cannot find this binary: {e}"))?;
         let home = installer_home(&exe)
             .ok_or_else(|| format!("{} was not installed with the installer", exe.display()))?;
+        let app = fs::canonicalize(&exe)
+            .ok()
+            .and_then(|exe| exe.ancestors().nth(3).map(Path::to_path_buf))
+            .ok_or("cannot find this copy's app bundle")?;
+        let team = team_id(&app).ok_or_else(|| {
+            format!(
+                "{} carries no Developer ID signature; reinstall with the installer",
+                app.display()
+            )
+        })?;
         Ok(Installer {
             home,
             base: Box::new(release_base),
+            team: Some(team),
         })
     }
 
     /// Download the archive and SHA256SUMS into a private folder, refuse the
-    /// archive unless its checksum matches, unpack it, check that it is
+    /// archive unless its checksum matches, unpack it, refuse it unless it is
+    /// signed by the same Developer ID team as this copy, check that it is
     /// `version` and starts, move it to `<home>/<version>` and switch `current`.
     /// The release that was current stays as the one rollback copy.
     fn install(&self, version: &str, current: &str, progress: bool) -> Result<(), String> {
+        let _lock = Lock::take(&self.home)?;
+        self.install_locked(version, current, progress)
+    }
+
+    fn install_locked(&self, version: &str, current: &str, progress: bool) -> Result<(), String> {
         let version = install_target(version, current)?;
+        let target = self.home.join(&version);
+        let previous = fs::canonicalize(self.home.join("current")).ok();
+        if previous.is_some() && previous == fs::canonicalize(&target).ok() {
+            return Err(format!("{version} is already the current release"));
+        }
         let base = (self.base)(&version);
         let work = WorkDir::create(&self.home)?;
         if progress {
@@ -780,6 +901,9 @@ impl Installer {
         if stated.trim() != version {
             return Err(format!("{ASSET} is not release {version}"));
         }
+        if let Some(team) = &self.team {
+            verify_signature(&payload.join("ultra-media-remote.app"), team)?;
+        }
         let ran = Command::new(payload.join(BINARY))
             .arg("--version")
             .env("ULTRA_MEDIA_REMOTE_NO_UPDATE_CHECK", "1")
@@ -795,11 +919,6 @@ impl Installer {
             format!("installer={ASSET}\nversion={version}\n"),
         )
         .map_err(|e| format!("cannot mark the release: {e}"))?;
-        let target = self.home.join(&version);
-        let previous = fs::canonicalize(self.home.join("current")).ok();
-        if previous.is_some() && previous == fs::canonicalize(&target).ok() {
-            return Err(format!("{version} is already the current release"));
-        }
         if target.exists() {
             if !target.join(MARKER).is_file() {
                 return Err(format!(
@@ -821,12 +940,13 @@ impl Installer {
     /// `update --rollback`: switch back to the kept folder when it is still
     /// there, else install that release again.
     fn rollback(&self, version: &str, current: &str, progress: bool) -> Result<(), String> {
+        let _lock = Lock::take(&self.home)?;
         let version = install_target(version, current)?;
         let kept = self.home.join(&version);
         let stated = fs::read_to_string(kept.join("VERSION")).unwrap_or_default();
         if stated.trim() != version || !kept.join(MARKER).is_file() || !kept.join(BINARY).is_file()
         {
-            return self.install(&version, current, progress);
+            return self.install_locked(&version, current, progress);
         }
         let left = fs::canonicalize(self.home.join("current")).ok();
         swap_current(&self.home, &kept)?;
@@ -835,6 +955,21 @@ impl Installer {
             &left.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
         );
         Ok(())
+    }
+
+    /// The one kept release folder other than the current one, if there is
+    /// exactly one: the rollback target when the state file was deleted.
+    fn kept_release(&self) -> Option<String> {
+        let current = fs::canonicalize(self.home.join("current")).ok();
+        let mut kept = fs::read_dir(&self.home)
+            .ok()?
+            .flatten()
+            .filter(|e| e.file_name().to_str().is_some_and(release_name))
+            .filter(|e| e.path().join(MARKER).is_file() && e.path().join(BINARY).is_file())
+            .filter(|e| fs::canonicalize(e.path()).ok() != current)
+            .filter_map(|e| e.file_name().into_string().ok());
+        let first = kept.next()?;
+        kept.next().is_none().then_some(first)
     }
 }
 
@@ -1036,9 +1171,10 @@ fn rollback(
     current: &str,
     terminal: bool,
 ) -> Result<(Value, u8), String> {
-    let previous = store.load().previous.ok_or_else(|| {
+    let kept = installer.as_ref().ok().and_then(Installer::kept_release);
+    let previous = store.load().previous.or(kept).ok_or_else(|| {
         format!(
-            "no earlier version is recorded; to install one, run: {}",
+            "no earlier version is recorded or kept; to install one, run: {}",
             install_hint("X.Y.Z")
         )
     })?;
@@ -1148,6 +1284,7 @@ mod tests {
             Installer {
                 home: home.to_path_buf(),
                 base: Box::new(move |_| release.clone()),
+                team: None,
             }
         }
     }
@@ -1468,6 +1605,65 @@ mod tests {
         assert_eq!(installer_home(&stale), None, "not the current release");
         let loose = dir.release_folder(&dir.path("loose"), "0.3.0", false);
         assert_eq!(installer_home(&loose.join(BINARY)), None, "no marker");
+    }
+
+    #[test]
+    fn a_second_update_of_the_same_copy_is_refused_while_one_runs() {
+        let dir = TestDir::new("lock");
+        let home = dir.home("0.3.0");
+        let release = dir.release_dir("0.4.0", "0.4.0");
+        let held = Lock::take(&home).unwrap();
+        let err = dir
+            .installer(&home, &release)
+            .install("0.4.0", "0.3.0", false)
+            .unwrap_err();
+        assert!(err.contains("another update"), "{err}");
+        drop(held);
+        dir.installer(&home, &release)
+            .install("0.4.0", "0.3.0", false)
+            .unwrap();
+        assert!(!home.join(".update-lock").exists(), "lock released");
+        assert_eq!(current_of(&home), "0.4.0");
+    }
+
+    #[test]
+    fn rollback_finds_the_kept_release_without_state() {
+        let dir = TestDir::new("kept");
+        let home = dir.home("0.4.0");
+        dir.release_folder(&home, "0.3.0", true);
+        let installer = dir.installer(&home, &dir.path("none"));
+        assert_eq!(installer.kept_release().as_deref(), Some("0.3.0"));
+        dir.release_folder(&home, "0.2.0", true);
+        assert_eq!(installer.kept_release(), None, "ambiguous");
+        assert!(!release_name("v0.1.0"));
+        assert!(release_name("0.1.0"));
+    }
+
+    #[test]
+    fn unsigned_apps_fail_the_signature_check() {
+        let dir = TestDir::new("sign");
+        let rel = dir.release_folder(&dir.path("r"), "0.4.0", false);
+        let app = rel.join("ultra-media-remote.app");
+        let err = verify_signature(&app, "ABCDE12345").unwrap_err();
+        assert!(err.contains("not signed by team ABCDE12345"), "{err}");
+        assert_eq!(team_id(&app), None);
+    }
+
+    #[test]
+    fn hints_name_the_right_command_for_each_install_kind() {
+        let dir = TestDir::new("hint");
+        let root = dir.path("cargo-root");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join(".crates2.json"), "{}").unwrap();
+        fs::write(root.join("bin").join(TOOL), "").unwrap();
+        let cargo = hint_for(Some(&root.join("bin").join(TOOL)), "0.4.0");
+        assert!(cargo.starts_with("cargo install --git "), "{cargo}");
+        assert!(cargo.contains("--tag v0.4.0"), "{cargo}");
+        let other = hint_for(Some(&dir.path("elsewhere/ultra-media-remote")), "0.4.0");
+        assert!(
+            other.contains("ULTRA_MEDIA_REMOTE_VERSION=0.4.0 sh"),
+            "{other}"
+        );
     }
 
     #[test]
