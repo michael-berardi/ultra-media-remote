@@ -3,7 +3,8 @@
 #   curl -fsSL https://github.com/michael-berardi/ultra-media-remote/releases/latest/download/install.sh | sh
 # Downloads the signed release, checks its SHA-256, installs into
 # ~/.local/share/ultra-media-remote/<version> and puts a shim in ~/.local/bin.
-# Refuses to replace a binary it did not install.
+# Refuses to replace a binary it did not install. Keeps one earlier release for
+# 'ultra-media-remote update --rollback'; see docs/updates.md.
 #
 # Environment: ULTRA_MEDIA_REMOTE_HOME (default ~/.local/share/ultra-media-remote),
 # ULTRA_MEDIA_REMOTE_BIN_DIR (default ~/.local/bin), ULTRA_MEDIA_REMOTE_VERSION
@@ -117,7 +118,16 @@ fi
 if [ -e "$CURRENT" ] || [ -L "$CURRENT" ]; then
   [ -L "$CURRENT" ] || die "$CURRENT exists but is not an installer link; refusing to clobber it"
 fi
+PREV=$(readlink "$CURRENT" 2>/dev/null || true)
 swap_link "$REL" "$CURRENT"
+
+# Keep the new release and the one it replaced (for 'update --rollback');
+# remove older release folders this installer made. Nothing else is touched.
+for old in "$HOME_DIR"/*; do
+  [ -d "$old" ] && [ ! -L "$old" ] && [ -f "$old/$MARKER" ] || continue
+  case "${old##*/}" in *[!0-9.]* | .* | *..* ) continue ;; esac
+  [ "$old" = "$REL" ] || [ "$old" = "$PREV" ] || rm -rf "$old"
+done
 
 if [ -e "$SHIM" ] || [ -L "$SHIM" ]; then
   if [ -L "$SHIM" ] || ! grep -q "$SHIM_MARKER" "$SHIM" 2>/dev/null; then
@@ -127,7 +137,7 @@ fi
 cat > "$SHIM.tmp.$$" <<WRAP
 #!/bin/sh
 $SHIM_MARKER
-exec "$REL/ultra-media-remote.app/Contents/MacOS/ultra-media-remote" "\$@"
+exec "$CURRENT/ultra-media-remote.app/Contents/MacOS/ultra-media-remote" "\$@"
 WRAP
 chmod 755 "$SHIM.tmp.$$"
 mv -f "$SHIM.tmp.$$" "$SHIM" || { rm -f "$SHIM.tmp.$$"; die "cannot install the shim $SHIM"; }

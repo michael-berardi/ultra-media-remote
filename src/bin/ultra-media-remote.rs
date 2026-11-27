@@ -3,7 +3,11 @@
 //! Every command writes a single JSON value to stdout so output can be piped
 //! into `jq` or consumed by another process. Diagnostics go to stderr.
 //! Arguments are parsed by hand to keep the binary dependency-free beyond the
-//! library's existing `serde_json`.
+//! library's existing `serde_json`. The update notice and `update` command
+//! (docs/updates.md) live in the CLI only; the library makes no network calls.
+
+#[path = "ultra-media-remote/update.rs"]
+mod update;
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -36,26 +40,56 @@ Commands:
   volume                 Print the default output volume as {\"volume\":number|null}
   volume <0..1>          Set the default output volume
   watch                  Print one JSON line whenever the Now Playing item changes
+  update                 Install the newest release (see docs/updates.md); also
+                         --check, --skip, --rollback, --auto on|off|status,
+                         --notify on|off|status
 
 Global options:
   --version, -V          Print the CLI version
   --help, -h, help       Print this help
 
 Exit status: 0 on success, 1 when a media operation was not delivered, 2 on
-invalid arguments. The adapter is discovered next to this binary (mediaremote/
+invalid arguments; `update --check` exits 10 when an update is available.
+The adapter is discovered next to this binary (mediaremote/
 or lib/mediaremote/) or via ULTRA_MEDIA_REMOTE_ADAPTER_DIR.
 ";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match run(&args) {
-        Ok(code) => code,
-        Err(message) => {
-            eprintln!("ultra-media-remote: {message}");
-            eprintln!("Run 'ultra-media-remote --help' for usage.");
-            ExitCode::from(2)
+    match args.first().map(String::as_str) {
+        Some("update") => {
+            return match update::parse_action(&args[1..]) {
+                Ok(action) => update::command(action),
+                Err(message) => usage_error(&message),
+            }
         }
+        Some(update::HELPER) => {
+            update::background(args.get(1).map(String::as_str) == Some("--check"));
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
     }
+    // --version and --help are what installers and scripts probe with: they
+    // never prune a kept release or print an update notice.
+    let probe = matches!(
+        args.first().map(String::as_str),
+        Some("--version" | "-V" | "--help" | "-h" | "help")
+    );
+    let result = run(&args);
+    if !probe {
+        update::settle(matches!(&result, Ok(code) if *code == ExitCode::SUCCESS));
+    }
+    let code = result.unwrap_or_else(|message| usage_error(&message));
+    if !probe {
+        update::after_command();
+    }
+    code
+}
+
+fn usage_error(message: &str) -> ExitCode {
+    eprintln!("ultra-media-remote: {message}");
+    eprintln!("Run 'ultra-media-remote --help' for usage.");
+    ExitCode::from(2)
 }
 
 fn run(args: &[String]) -> Result<ExitCode, String> {

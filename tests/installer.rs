@@ -283,3 +283,77 @@ fn installer_refuses_non_macos_hosts() {
     assert!(stderr.contains("macOS binary only"), "stderr: {stderr}");
     assert!(!home.join(".local/bin/ultra-media-remote").exists());
 }
+
+/// A release dir for `version` whose binary is a stand-in script.
+fn scripted_release(temp: &TempDir, version: &str) -> PathBuf {
+    let root = temp.path().join(format!("release-{version}"));
+    let stage = temp.path().join(format!("stage-{version}"));
+    let app = stage.join("ultra-media-remote.app/Contents");
+    let adapter = app.join("Resources/mediaremote");
+    fs::create_dir_all(app.join("MacOS")).expect("create app dir");
+    fs::create_dir_all(adapter.join("MediaRemoteAdapter.framework")).expect("create adapter");
+    fs::create_dir_all(&root).expect("create release dir");
+    let bin = app.join("MacOS/ultra-media-remote");
+    fs::write(
+        &bin,
+        format!("#!/bin/sh\necho 'ultra-media-remote {version}'\n"),
+    )
+    .unwrap();
+    make_executable(&bin);
+    fs::write(adapter.join("mediaremote-adapter.pl"), "#!/bin/sh\n").unwrap();
+    fs::write(stage.join("VERSION"), version).unwrap();
+    fs::write(stage.join("LICENSE"), "MIT\n").unwrap();
+    fs::write(stage.join("THIRD_PARTY_NOTICES.md"), "notices\n").unwrap();
+    let tar = run(Command::new("tar")
+        .arg("-czf")
+        .arg(root.join(ASSET))
+        .arg("-C")
+        .arg(&stage)
+        .args([
+            "ultra-media-remote.app",
+            "VERSION",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+        ]));
+    assert_success(&tar, "tar");
+    let sums = run(Command::new("shasum")
+        .args(["-a", "256", ASSET])
+        .current_dir(&root));
+    assert_success(&sums, "shasum");
+    fs::write(root.join("SHA256SUMS"), sums.stdout).unwrap();
+    root
+}
+
+#[test]
+fn installer_keeps_one_earlier_release_and_the_shim_follows_current() {
+    let temp = TempDir::new("prune");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("create home");
+    let share = home.join(".local/share/ultra-media-remote");
+    for version in ["9.0.0", "9.1.0", "9.2.0"] {
+        let release = scripted_release(&temp, version);
+        assert_success(&installer(&release, &home), version);
+    }
+    // A folder the installer did not make is never removed.
+    let mut names: Vec<String> = fs::read_dir(&share)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["9.1.0", "9.2.0", "current"]);
+    let shim = fs::read_to_string(home.join(".local/bin/ultra-media-remote")).unwrap();
+    assert!(shim.contains("/current/ultra-media-remote.app/"), "{shim}");
+    let version = run(Command::new(home.join(".local/bin/ultra-media-remote")).arg("--version"));
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "ultra-media-remote 9.2.0"
+    );
+
+    fs::create_dir_all(share.join("1.0.0")).unwrap();
+    let release = scripted_release(&temp, "9.3.0");
+    assert_success(&installer(&release, &home), "9.3.0");
+    assert!(share.join("1.0.0").is_dir(), "foreign folder removed");
+    assert!(!share.join("9.1.0").exists());
+    assert!(share.join("9.2.0").is_dir());
+}

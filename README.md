@@ -1,7 +1,5 @@
 # ultra-media-remote
 
-[![Latest release](https://img.shields.io/github/v/release/michael-berardi/ultra-media-remote?label=release)](https://github.com/michael-berardi/ultra-media-remote/releases/latest) [![MIT License](https://img.shields.io/github/license/michael-berardi/ultra-media-remote)](LICENSE) ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black) ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
-
 Read macOS Now Playing metadata and control playback from Rust. For desktop
 apps that need track details, artwork, transport controls, or output volume
 without separate integrations for each player.
@@ -40,6 +38,20 @@ a macOS arm64 tarball (signed CLI app bundle, staged adapter, licenses),
 **On macOS 15.4+, full metadata needs a Developer ID-signed adapter.** The
 installer stages it for the CLI; a Cargo-only build must stage it itself. See
 [Adapter setup](#adapter-setup).
+
+## Updates
+
+The CLI checks for a newer release at most once a day and prints a short notice
+after your command; `ultra-media-remote update` installs it, and automatic
+installs are opt-in. The library never checks. See [docs/updates.md](docs/updates.md).
+
+## Privacy
+
+- No telemetry, analytics or identifiers. Track metadata stays on your Mac.
+- The library makes no network requests and writes nothing to disk.
+- The CLI's only request on its own is the daily update check: one anonymous GET of the public release record.
+- It is off in CI, agent shells and non-terminal use, and with `ULTRA_MEDIA_REMOTE_NO_UPDATE_CHECK=1`.
+- Details, local files and how to remove them: [PRIVACY.md](PRIVACY.md).
 
 ## First snapshot
 
