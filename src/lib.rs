@@ -10,9 +10,9 @@
 //! On non-macOS targets the FFI layer compiles to stubs so the crate still
 //! builds; all queries simply report unavailable.
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, OsStr};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -434,28 +434,39 @@ static ADAPTER_CACHE: LazyLock<Mutex<AdapterCache>> = LazyLock::new(|| {
     })
 });
 
-/// Locates the staged adapter directory. Candidates, in order: the
-/// `ULTRA_MEDIA_REMOTE_ADAPTER_DIR` environment variable, a `mediaremote`
-/// directory next to the executable, and a `Resources/mediaremote` directory
-/// of an app bundle containing the executable. A candidate counts only when
-/// it contains both adapter parts.
-fn adapter_directory() -> Option<PathBuf> {
+/// Adapter directories to try, in priority order, for one executable path.
+///
+/// The environment override wins. Then come `mediaremote` and
+/// `lib/mediaremote` next to the executable, followed by the
+/// `Resources/mediaremote` and `lib/mediaremote` directories of the parent
+/// (an app bundle's `Contents`, or an install root with a `bin/` directory).
+fn adapter_candidates(executable: Option<&Path>, override_dir: Option<&OsStr>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(path) = std::env::var_os("ULTRA_MEDIA_REMOTE_ADAPTER_DIR") {
+    if let Some(path) = override_dir {
         candidates.push(PathBuf::from(path));
     }
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(binary_dir) = executable.parent() {
-            candidates.push(binary_dir.join("mediaremote"));
-            if let Some(contents_dir) = binary_dir.parent() {
-                candidates.push(contents_dir.join("Resources").join("mediaremote"));
-            }
+    if let Some(binary_dir) = executable.and_then(Path::parent) {
+        candidates.push(binary_dir.join("mediaremote"));
+        candidates.push(binary_dir.join("lib").join("mediaremote"));
+        if let Some(parent) = binary_dir.parent() {
+            candidates.push(parent.join("Resources").join("mediaremote"));
+            candidates.push(parent.join("lib").join("mediaremote"));
         }
     }
-    candidates.into_iter().find(|directory| {
-        directory.join("mediaremote-adapter.pl").is_file()
-            && directory.join("MediaRemoteAdapter.framework").is_dir()
-    })
+    candidates
+}
+
+/// Locates the staged adapter directory. A candidate counts only when it
+/// contains both adapter parts.
+fn adapter_directory() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok();
+    let override_dir = std::env::var_os("ULTRA_MEDIA_REMOTE_ADAPTER_DIR");
+    adapter_candidates(executable.as_deref(), override_dir.as_deref())
+        .into_iter()
+        .find(|directory| {
+            directory.join("mediaremote-adapter.pl").is_file()
+                && directory.join("MediaRemoteAdapter.framework").is_dir()
+        })
 }
 
 fn adapter_string(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -1014,6 +1025,30 @@ mod tests {
     fn non_macos_volume_stubs_are_unavailable() {
         assert_eq!(output_volume(), None);
         assert!(!set_output_volume(0.5));
+    }
+
+    #[test]
+    fn adapter_candidates_cover_bundled_and_installed_layouts() {
+        let executable = Path::new("/apps/ultra-media-remote/bin/ultra-media-remote");
+        assert_eq!(
+            adapter_candidates(Some(executable), None),
+            vec![
+                PathBuf::from("/apps/ultra-media-remote/bin/mediaremote"),
+                PathBuf::from("/apps/ultra-media-remote/bin/lib/mediaremote"),
+                PathBuf::from("/apps/ultra-media-remote/Resources/mediaremote"),
+                PathBuf::from("/apps/ultra-media-remote/lib/mediaremote"),
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_candidates_put_the_environment_override_first() {
+        let executable = Path::new("/apps/tool/tool");
+        let override_dir = OsStr::new("/opt/adapter");
+        let candidates = adapter_candidates(Some(executable), Some(override_dir));
+        assert_eq!(candidates.first(), Some(&PathBuf::from("/opt/adapter")));
+        assert_eq!(candidates.len(), 5);
+        assert!(adapter_candidates(None, None).is_empty());
     }
 
     #[test]
